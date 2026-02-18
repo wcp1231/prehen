@@ -7,6 +7,7 @@ defmodule Prehen.MixProject do
       version: "0.1.0",
       elixir: "~> 1.19",
       start_permanent: Mix.env() == :prod,
+      escript: [main_module: Prehen.CLI],
       deps: deps()
     ]
   end
@@ -21,8 +22,11 @@ defmodule Prehen.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      # {:dep_from_hexpm, "~> 0.3.0"},
-      # {:dep_from_git, git: "https://github.com/elixir-lang/my_dep.git", tag: "0.1.0"}
+      {:jido, "~> 2.0.0-rc.4"},
+      {:jido_action, github: "agentjido/jido_action", branch: "main", override: true, depth: 1},
+      {:jido_ai, github: "agentjido/jido_ai", branch: "main", depth: 1},
+      {:req_llm, github: "agentjido/req_llm", branch: "main", override: true, depth: 1},
+      {:jason, "~> 1.4"}
     ]
   end
 end
