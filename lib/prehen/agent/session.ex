@@ -1,12 +1,29 @@
 defmodule Prehen.Agent.Session do
-  @moduledoc false
+  @moduledoc """
+  会话执行面（data plane）进程。
+
+  中文：
+  - 负责同一 `session` 内请求队列与回合调度（`prompt/steering/follow_up`）。
+  - 统一处理中断语义：`steering` 会优先抢占并取消当前回合。
+  - 产出 typed events，并同步写入 canonical conversation/event store。
+  - 在每回合结束时更新 memory（STM 主，LTM 可降级）。
+
+  English:
+  - Data-plane process for single-session execution.
+  - Owns queueing and turn scheduling for `prompt/steering/follow_up`.
+  - Centralizes interruption semantics (`steering` preempts in-flight turns).
+  - Emits typed events and persists them to the canonical conversation/event store.
+  - Updates memory at turn boundaries (STM-first, LTM can degrade safely).
+  """
 
   use GenServer
 
   alias Prehen.Agent.EventBridge
   alias Prehen.Agent.Policies.{ModelRouter, RetryPolicy}
+  alias Prehen.Memory
+  alias Prehen.Workspace.SessionQueue
 
-  @type queue_kind :: :prompt | :steering | :follow_up
+  @type queue_kind :: SessionQueue.queue_kind()
 
   @spec start(map(), keyword()) :: GenServer.on_start()
   def start(config, opts \\ []) when is_map(config) do
@@ -23,21 +40,37 @@ defmodule Prehen.Agent.Session do
     GenServer.stop(server, :normal, 5_000)
   end
 
+  @doc """
+  提交普通用户消息到会话队列（低于 steering 优先级）。
+  Enqueue a normal user prompt for the current session.
+  """
   @spec prompt(GenServer.server(), String.t(), keyword()) :: {:ok, map()} | {:error, map()}
   def prompt(server, text, opts \\ []) when is_binary(text) do
     enqueue(server, :prompt, text, opts)
   end
 
+  @doc """
+  提交 steering 消息，触发抢占语义并优先执行。
+  Enqueue a steering message with preemption priority.
+  """
   @spec steer(GenServer.server(), String.t(), keyword()) :: {:ok, map()} | {:error, map()}
   def steer(server, text, opts \\ []) when is_binary(text) do
     enqueue(server, :steering, text, opts)
   end
 
+  @doc """
+  提交 follow-up 消息，当前回合完成后续接执行。
+  Enqueue a follow-up message to continue after current turn.
+  """
   @spec follow_up(GenServer.server(), String.t(), keyword()) :: {:ok, map()} | {:error, map()}
   def follow_up(server, text, opts \\ []) when is_binary(text) do
     enqueue(server, :follow_up, text, opts)
   end
 
+  @doc """
+  阻塞等待会话空闲，并返回统一结果（含 trace）。
+  Block until the session becomes idle and return the final runtime result.
+  """
   @spec await_idle(GenServer.server(), keyword()) :: {:ok, map()} | {:error, term()}
   def await_idle(server, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, 60_000)
@@ -70,9 +103,7 @@ defmodule Prehen.Agent.Session do
         agent: agent,
         session_id: gen_id("session"),
         status: :idle,
-        prompt_q: :queue.new(),
-        steer_q: :queue.new(),
-        followup_q: :queue.new(),
+        queue: SessionQueue.new(),
         active: nil,
         waiters: [],
         events: [],
@@ -81,7 +112,12 @@ defmodule Prehen.Agent.Session do
         last_result: nil
       }
 
-      {:ok, maybe_emit_queue_drained(state)}
+      state =
+        state
+        |> maybe_init_memory_session()
+        |> maybe_emit_queue_drained()
+
+      {:ok, state}
     else
       {:error, reason} ->
         {:stop, reason}
@@ -123,15 +159,13 @@ defmodule Prehen.Agent.Session do
   def handle_call(:events, _from, state), do: {:reply, state.events, state}
 
   def handle_call(:snapshot, _from, state) do
+    queue_sizes = SessionQueue.sizes(state.queue)
+
     snapshot = %{
       session_id: state.session_id,
       status: state.status,
       active: summarize_active(state.active),
-      queue_sizes: %{
-        prompt: :queue.len(state.prompt_q),
-        steering: :queue.len(state.steer_q),
-        follow_up: :queue.len(state.followup_q)
-      }
+      queue_sizes: queue_sizes
     }
 
     {:reply, snapshot, state}
@@ -199,6 +233,13 @@ defmodule Prehen.Agent.Session do
     |> Map.put_new(:session_status_poll_ms, 50)
     |> Map.put_new(:timeout_ms, 15_000)
     |> Map.put_new(:max_steps, 8)
+    |> Map.put_new(:stm_buffer_limit, 24)
+    |> Map.put_new(:stm_token_budget, 8_000)
+    |> Map.put_new(:ltm_adapter_name, :noop)
+    |> Map.put_new(:ltm_adapter, nil)
+    |> Map.put_new(:capability_packs, [:local_fs])
+    |> Map.put_new(:workspace_capability_allowlist, [:local_fs])
+    |> Map.put_new(:tools, [Prehen.Actions.LS, Prehen.Actions.Read])
   end
 
   defp apply_model_router(config) do
@@ -213,6 +254,8 @@ defmodule Prehen.Agent.Session do
   defp maybe_cancel_for_steering(state, kind) when kind != :steering, do: state
 
   defp maybe_cancel_for_steering(%{active: active} = state, :steering) do
+    # Steering preempts the in-flight turn but leaves queued items intact.
+    # Steering 会抢占当前回合，但不会清空队列中的后续消息。
     _ = state.adapter.steer(state.agent, request_id: active.request_id, reason: :steering)
 
     emit(state, "ai.session.steer", %{
@@ -227,12 +270,12 @@ defmodule Prehen.Agent.Session do
   defp maybe_start_next_turn(%{active: active} = state) when not is_nil(active), do: state
 
   defp maybe_start_next_turn(state) do
-    case pop_next_item(state) do
-      {:none, state} ->
+    case SessionQueue.pop_next(state.queue) do
+      {:none, _queue} ->
         maybe_emit_queue_drained(state)
 
-      {item, state} ->
-        start_turn(state, item)
+      {item, next_queue} ->
+        start_turn(%{state | queue: next_queue}, item)
     end
   end
 
@@ -298,6 +341,13 @@ defmodule Prehen.Agent.Session do
           run_id: run_id,
           turn_id: turn_id,
           query: item.text
+        })
+        |> store_message(%{
+          role: :user,
+          content: item.text,
+          request_id: request_id,
+          run_id: run_id,
+          turn_id: turn_id
         })
         |> schedule_tick()
 
@@ -482,7 +532,19 @@ defmodule Prehen.Agent.Session do
       turn_id: state.active.turn_id,
       outcome: :completed
     })
+    |> store_message(%{
+      role: :assistant,
+      content: answer,
+      request_id: state.active.request_id,
+      run_id: state.active.run_id,
+      turn_id: state.active.turn_id
+    })
     |> Map.put(:last_result, %{status: :ok, reason: nil, answer: answer})
+    |> persist_memory_turn(%{
+      status: :ok,
+      answer: answer,
+      raw_result: result
+    })
     |> clear_active()
   end
 
@@ -506,10 +568,24 @@ defmodule Prehen.Agent.Session do
         outcome: :failed,
         reason: reason
       })
+      |> store_message(%{
+        role: :assistant,
+        content: partial,
+        status: :failed,
+        reason: reason,
+        request_id: state.active.request_id,
+        run_id: state.active.run_id,
+        turn_id: state.active.turn_id
+      })
       |> Map.put(:last_result, %{
         status: :error,
         reason: reason,
         answer: "执行失败：#{inspect(reason)}"
+      })
+      |> persist_memory_turn(%{
+        status: :error,
+        reason: reason,
+        answer: partial
       })
 
     clear_active(state)
@@ -545,6 +621,9 @@ defmodule Prehen.Agent.Session do
   end
 
   defp maybe_emit_skipped_tool_results(%{active: %{interrupted?: true} = active} = state) do
+    # Any unresolved tool call is materialized as "skipped" so downstream
+    # consumers get a consistent, side-effect-free interruption trace.
+    # 中断时把未完成工具调用显式落为 skipped，确保下游可一致消费且无副作用。
     pending =
       active.tool_states
       |> Enum.filter(fn {_id, info} -> info.status != :completed end)
@@ -589,6 +668,8 @@ defmodule Prehen.Agent.Session do
   end
 
   defp build_runtime_result(state) do
+    trace = canonical_trace(state.session_id, state.events)
+
     base =
       state.last_result ||
         %{
@@ -598,8 +679,8 @@ defmodule Prehen.Agent.Session do
         }
 
     Map.merge(base, %{
-      steps: count_steps(state.events),
-      trace: state.events
+      steps: count_steps(trace),
+      trace: trace
     })
   end
 
@@ -610,6 +691,10 @@ defmodule Prehen.Agent.Session do
   defp emit(state, type, payload) do
     correlation = correlation_fields(state)
     event = EventBridge.project(type, Map.merge(correlation, payload))
+
+    _ =
+      Prehen.Conversation.Store.write(state.session_id, Map.put(event, :kind, :event))
+
     %{state | events: state.events ++ [event]}
   end
 
@@ -637,37 +722,11 @@ defmodule Prehen.Agent.Session do
     end
   end
 
-  defp pop_next_item(state) do
-    cond do
-      not :queue.is_empty(state.steer_q) ->
-        {{:value, item}, q} = :queue.out(state.steer_q)
-        {item, %{state | steer_q: q}}
-
-      not :queue.is_empty(state.prompt_q) ->
-        {{:value, item}, q} = :queue.out(state.prompt_q)
-        {item, %{state | prompt_q: q}}
-
-      not :queue.is_empty(state.followup_q) ->
-        {{:value, item}, q} = :queue.out(state.followup_q)
-        {item, %{state | followup_q: q}}
-
-      true ->
-        {:none, state}
-    end
-  end
-
-  defp put_queue_item(state, :prompt, item),
-    do: %{state | prompt_q: :queue.in(item, state.prompt_q)}
-
-  defp put_queue_item(state, :steering, item),
-    do: %{state | steer_q: :queue.in(item, state.steer_q)}
-
-  defp put_queue_item(state, :follow_up, item),
-    do: %{state | followup_q: :queue.in(item, state.followup_q)}
+  defp put_queue_item(state, kind, item),
+    do: %{state | queue: SessionQueue.put(state.queue, kind, item)}
 
   defp idle?(state) do
-    is_nil(state.active) and :queue.is_empty(state.prompt_q) and :queue.is_empty(state.steer_q) and
-      :queue.is_empty(state.followup_q)
+    is_nil(state.active) and SessionQueue.empty?(state.queue)
   end
 
   defp extract_status_details(%{snapshot: snapshot}) when is_map(snapshot) do
@@ -736,5 +795,84 @@ defmodule Prehen.Agent.Session do
 
   defp gen_id(prefix) do
     "#{prefix}_#{System.unique_integer([:positive])}"
+  end
+
+  defp canonical_trace(session_id, fallback) do
+    case Prehen.Conversation.Store.replay(session_id, kind: :event) do
+      [] ->
+        fallback
+
+      records ->
+        Enum.map(records, fn record ->
+          Map.drop(record, [:kind, :stored_at_ms])
+        end)
+    end
+  rescue
+    _ -> fallback
+  catch
+    :exit, _ -> fallback
+  end
+
+  defp maybe_init_memory_session(state) do
+    _ = Memory.ensure_session(state.session_id, memory_opts(state.config))
+    state
+  end
+
+  defp persist_memory_turn(%{active: nil} = state, _payload), do: state
+
+  defp persist_memory_turn(state, payload) do
+    turn =
+      %{
+        source: "session",
+        request_id: state.active.request_id,
+        run_id: state.active.run_id,
+        turn_id: state.active.turn_id,
+        kind: state.active.item.kind,
+        input: state.active.item.text,
+        tool_calls: summarize_tool_states(state.active.tool_states),
+        at_ms: System.system_time(:millisecond)
+      }
+      |> Map.merge(payload)
+
+    _ = Memory.record_turn(state.session_id, turn, memory_opts(state.config))
+    state
+  end
+
+  defp store_message(state, message) when is_map(message) do
+    record =
+      message
+      |> Map.put_new(:kind, :message)
+      |> Map.put_new(:session_id, state.session_id)
+      |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+      |> Map.new()
+
+    _ = Prehen.Conversation.Store.write(state.session_id, record)
+    state
+  rescue
+    _ -> state
+  catch
+    :exit, _ -> state
+  end
+
+  defp summarize_tool_states(tool_states) when is_map(tool_states) do
+    Enum.map(tool_states, fn {call_id, info} ->
+      %{
+        call_id: call_id,
+        name: info.name,
+        status: info.status,
+        result: info.result
+      }
+    end)
+  end
+
+  defp summarize_tool_states(_), do: []
+
+  defp memory_opts(config) do
+    [
+      buffer_limit: config[:stm_buffer_limit],
+      token_budget_limit: config[:stm_token_budget],
+      ltm_adapter: config[:ltm_adapter],
+      ltm_adapter_name: config[:ltm_adapter_name]
+    ]
   end
 end

@@ -78,10 +78,12 @@ defmodule Prehen.Agent.SessionTest do
     assert is_integer(request_started.turn_id)
     assert is_integer(request_started.at_ms)
     assert request_started.source == "prehen.session"
+    assert request_started.schema_version == 2
 
     assert request_completed.request_id == request_started.request_id
     assert request_completed.run_id == request_started.run_id
     assert request_completed.turn_id == request_started.turn_id
+    assert request_completed.schema_version == 2
   end
 
   test "handles concurrent message injections and keeps queue draining contract" do
@@ -105,5 +107,22 @@ defmodule Prehen.Agent.SessionTest do
     completed = Enum.filter(result.trace, &(&1.type == "ai.request.completed"))
     assert length(completed) == 3
     assert List.last(result.trace).type == "ai.session.queue.drained"
+  end
+
+  test "persists turn context into session stm memory" do
+    {:ok, session} = Session.start(base_config())
+    on_exit(fn -> Session.stop(session) end)
+
+    assert {:ok, _} = Session.prompt(session, "memory hello")
+    assert {:ok, _} = Session.await_idle(session, timeout: 3_000)
+
+    %{session_id: session_id} = Session.snapshot(session)
+    assert {:ok, context} = Prehen.Memory.context(session_id)
+
+    assert Enum.any?(context.stm.conversation_buffer, fn turn ->
+             turn.source == "session" and turn.input == "memory hello" and turn.status == :ok
+           end)
+
+    assert context.stm.token_budget.used > 0
   end
 end

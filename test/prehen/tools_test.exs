@@ -51,4 +51,21 @@ defmodule Prehen.ActionsTest do
     assert result["ok"] == false
     assert result["error"]["type"] == "validation_error"
   end
+
+  test "local fs tools are read-only and side-effect free", %{root: root, config: config} do
+    file = Path.join(root, "readonly.txt")
+    File.write!(file, "alpha\nbeta")
+
+    before_entries = File.ls!(root) |> Enum.sort()
+    before_content = File.read!(file)
+
+    _ = LS.invoke(%{"path" => "."}, config)
+    _ = Read.invoke(%{"path" => "readonly.txt"}, config)
+
+    after_entries = File.ls!(root) |> Enum.sort()
+    after_content = File.read!(file)
+
+    assert after_entries == before_entries
+    assert after_content == before_content
+  end
 end

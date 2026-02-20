@@ -48,7 +48,8 @@ defmodule Prehen.CLITest do
 
     stderr =
       capture_io(:stderr, fn ->
-        assert {:error, %{reason: :unknown_provider}} =
+        assert {:error,
+                %{status: :error, type: :runtime_failed, reason: %{reason: :unknown_provider}}} =
                  Prehen.CLI.main([
                    "run",
                    "fail",
@@ -60,5 +61,34 @@ defmodule Prehen.CLITest do
       end)
 
     assert stderr =~ "Execution failed"
+  end
+
+  test "trace_json outputs typed envelope schema without legacy fields" do
+    Application.put_env(:prehen, :agent_backend, Prehen.Agent.Backends.JidoAI)
+    Application.put_env(:prehen, :session_adapter, Prehen.Test.FakeSessionAdapter)
+
+    on_exit(fn ->
+      Application.delete_env(:prehen, :agent_backend)
+      Application.delete_env(:prehen, :session_adapter)
+    end)
+
+    output =
+      capture_io(fn ->
+        assert {:ok, %{status: :ok}} = Prehen.CLI.main(["run", "hello", "--trace-json"])
+      end)
+
+    [_, trace_and_answer] = String.split(output, "Trace:\n", parts: 2)
+    [trace_json, _answer] = String.split(trace_and_answer, "\nAnswer:\n", parts: 2)
+    trace = Jason.decode!(String.trim(trace_json))
+
+    assert is_list(trace) and trace != []
+
+    Enum.each(trace, fn event ->
+      assert is_binary(event["type"])
+      assert is_integer(event["at_ms"])
+      assert event["source"] == "prehen.session"
+      assert event["schema_version"] == 2
+      refute Map.has_key?(event, "event")
+    end)
   end
 end

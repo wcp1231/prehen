@@ -1,10 +1,10 @@
 ## Requirements
 
 ### Requirement: LS 工具能力
-系统 MUST 提供 `ls` 工具用于列出指定目录内容，并将结果返回给 Agent 作为 observation。
+系统 MUST 以可插拔 tool pack 形式提供 `ls` 工具能力，并将执行结果返回给 Agent 作为 observation。
 
 #### Scenario: 列出允许目录下的文件
-- **WHEN** Agent 调用 `ls` 且参数 `path` 位于允许根目录内
+- **WHEN** Agent 在已启用 `local-fs` capability 的 workspace 中调用 `ls` 且参数 `path` 位于允许根目录内
 - **THEN** 系统 SHALL 返回目录条目列表，并包含足够信息供后续决策使用
 
 #### Scenario: 访问越界目录被拒绝
@@ -12,7 +12,7 @@
 - **THEN** 系统 SHALL 拒绝执行并返回明确错误信息
 
 ### Requirement: READ 工具能力
-系统 MUST 提供 `read` 工具用于读取文本文件，并支持限制读取范围或读取长度。
+系统 MUST 以可插拔 tool pack 形式提供 `read` 工具能力，用于读取文本文件并支持限制读取范围或读取长度。
 
 #### Scenario: 读取文本文件内容
 - **WHEN** Agent 调用 `read` 读取允许路径下的文本文件
@@ -23,7 +23,7 @@
 - **THEN** 系统 SHALL 返回被截断内容并附带截断提示
 
 ### Requirement: 工具参数与错误处理
-系统 MUST 对工具输入参数进行验证，并以统一错误结构返回失败结果。
+系统 MUST 对工具输入参数进行验证，并以统一错误结构返回失败结果，同时保持 tool pack 执行错误不破坏会话主流程。
 
 #### Scenario: 缺失必需参数
 - **WHEN** Agent 调用工具时缺失 `path` 等必需参数
@@ -34,7 +34,7 @@
 - **THEN** 系统 SHALL 返回可诊断的失败结果且不中断整个 Agent 会话
 
 ### Requirement: 会话中断兼容语义
-系统 MUST 在 steering 中断场景下保证工具调用可跳过且不会产生额外文件系统访问副作用。
+系统 MUST 在 steering 中断场景下保证工具调用可跳过且不会产生额外文件系统访问副作用，并由 Session 队列层统一触发 skipped 语义。
 
 #### Scenario: 工具调用被标记为 skipped
 - **WHEN** 运行时因已排队 steering 消息而将某个 `ls/read` 调用标记为 skipped

@@ -4,6 +4,8 @@ defmodule Prehen.Agent.Backends.JidoAI do
   @behaviour Prehen.Agent.Backend
   @jido_instance Prehen.JidoRuntime
 
+  alias Prehen.Agent.EventBridge
+
   @type agent_handle :: %{
           module: module(),
           pid: pid()
@@ -169,6 +171,7 @@ defmodule Prehen.Agent.Backends.JidoAI do
     suffix = :erlang.unique_integer([:positive])
     module = Module.concat([Prehen, Agent, RuntimeAgent, :"M#{suffix}"])
     max_iterations = config[:max_steps] || 8
+    tools = resolve_tools(config)
 
     contents =
       quote do
@@ -178,7 +181,7 @@ defmodule Prehen.Agent.Backends.JidoAI do
           plugins: [Jido.AI.Plugins.TaskSupervisor],
           strategy:
             {Prehen.Agent.Strategies.ReactExt,
-             tools: [Prehen.Actions.LS, Prehen.Actions.Read],
+             tools: unquote(tools),
              model: :prehen,
              max_iterations: unquote(max_iterations),
              request_policy: :reject,
@@ -317,6 +320,18 @@ defmodule Prehen.Agent.Backends.JidoAI do
     module
   end
 
+  defp resolve_tools(config) do
+    case Map.get(config, :tools) do
+      tools when is_list(tools) ->
+        tools
+        |> Enum.filter(&is_atom/1)
+        |> Enum.uniq()
+
+      _ ->
+        [Prehen.Actions.LS, Prehen.Actions.Read]
+    end
+  end
+
   defp format_success(answer, status) do
     steps = extract_steps(status)
     answer_text = extract_answer(answer)
@@ -327,12 +342,16 @@ defmodule Prehen.Agent.Backends.JidoAI do
       steps: steps,
       answer: answer_text,
       trace: [
-        %{
-          event: :finished,
-          status: "ok",
-          steps: steps,
-          framework: %{jido_ai_agent: true}
-        }
+        EventBridge.project(
+          "ai.request.completed",
+          %{
+            status: :ok,
+            steps: steps,
+            result: answer_text,
+            framework: %{jido_ai_agent: true}
+          },
+          source: "prehen.backend.jido_ai"
+        )
       ]
     }
   end
@@ -346,12 +365,15 @@ defmodule Prehen.Agent.Backends.JidoAI do
       steps: steps,
       answer: "执行失败：#{inspect(reason)}",
       trace: [
-        %{
-          event: :failed,
-          status: "error",
-          reason: inspect(reason),
-          steps: steps
-        }
+        EventBridge.project(
+          "ai.request.failed",
+          %{
+            status: :error,
+            reason: inspect(reason),
+            steps: steps
+          },
+          source: "prehen.backend.jido_ai"
+        )
       ]
     }
   end

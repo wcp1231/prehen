@@ -31,7 +31,7 @@ defmodule Prehen.CLI do
   end
 
   defp run_task(task, opts) do
-    case Prehen.run(task, opts) do
+    case Prehen.Client.Surface.run(task, opts) do
       {:ok, result} ->
         print_result(result, opts)
         {:ok, result}
@@ -52,7 +52,7 @@ defmodule Prehen.CLI do
     IO.puts(result.answer)
   end
 
-  defp print_error(result, opts) do
+  defp print_error(result, opts) when is_map(result) do
     if Keyword.get(opts, :trace_json, false) do
       IO.puts("Trace:")
       IO.puts(Jason.encode!(Map.get(result, :trace, [])))
@@ -60,5 +60,9 @@ defmodule Prehen.CLI do
 
     IO.puts(:stderr, "Execution failed: #{inspect(Map.get(result, :reason, :unknown))}")
     IO.puts(:stderr, Map.get(result, :answer, ""))
+  end
+
+  defp print_error(reason, _opts) do
+    IO.puts(:stderr, "Execution failed: #{inspect(reason)}")
   end
 end
