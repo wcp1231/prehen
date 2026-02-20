@@ -14,7 +14,7 @@ defmodule Prehen.Memory do
   - Uses STM-first reads; LTM failures degrade gracefully.
   """
 
-  alias Prehen.Memory.{LTMAdapters, STM}
+  alias Prehen.Memory.{LTMAdapters, STM, STMProjector}
   alias Prehen.Memory.LTM.NoopAdapter
 
   @default_ltm_adapter_name :noop
@@ -26,6 +26,12 @@ defmodule Prehen.Memory do
           ltm_error: term() | nil,
           source: :stm_only | :stm_plus_ltm | :stm_ltm_degraded
         }
+
+  @spec rebuild_session(String.t(), [map()], keyword()) :: {:ok, map()} | {:error, term()}
+  def rebuild_session(session_id, records, opts \\ [])
+      when is_binary(session_id) and is_list(records) and is_list(opts) do
+    STMProjector.rebuild(session_id, records, stm_opts(opts))
+  end
 
   @spec ensure_session(String.t(), keyword()) :: {:ok, STM.session_memory()}
   def ensure_session(session_id, opts \\ []) when is_binary(session_id) and is_list(opts) do

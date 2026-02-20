@@ -95,29 +95,37 @@ defmodule Prehen.Agent.Session do
       |> apply_model_router()
 
     adapter = config[:session_adapter]
+    session_id = resolve_session_id(config)
+    turn_seq = normalize_non_neg_int(Map.get(config, :turn_seq), 0)
 
     with {:ok, agent} <- adapter.start_agent(config) do
       state = %{
         config: config,
         adapter: adapter,
         agent: agent,
-        session_id: gen_id("session"),
+        session_id: session_id,
         status: :idle,
         queue: SessionQueue.new(),
         active: nil,
         waiters: [],
         events: [],
-        turn_seq: 0,
+        turn_seq: turn_seq,
         queue_drained_emitted?: false,
         last_result: nil
       }
 
-      state =
-        state
-        |> maybe_init_memory_session()
-        |> maybe_emit_queue_drained()
+      case maybe_restore_from_ledger(state) do
+        {:ok, restored_state} ->
+          restored_state =
+            restored_state
+            |> maybe_init_memory_session()
+            |> maybe_emit_queue_drained()
 
-      {:ok, state}
+          {:ok, restored_state}
+
+        {:error, reason} ->
+          {:stop, reason}
+      end
     else
       {:error, reason} ->
         {:stop, reason}
@@ -512,6 +520,7 @@ defmodule Prehen.Agent.Session do
   defp finalize_turn(state, {:ok, result}) do
     answer = extract_answer(result)
     call_id = get_in(state, [:active, :llm_call_id]) || get_in(state, [:active, :request_id])
+    working_context = %{last_turn_status: :ok, last_answer: answer}
 
     state
     |> maybe_emit_llm_response(call_id, result)
@@ -532,6 +541,13 @@ defmodule Prehen.Agent.Session do
       turn_id: state.active.turn_id,
       outcome: :completed
     })
+    |> emit_turn_summary(%{
+      input: state.active.item.text,
+      answer: answer,
+      status: :ok,
+      tool_calls: summarize_tool_states(state.active.tool_states),
+      working_context: working_context
+    })
     |> store_message(%{
       role: :assistant,
       content: answer,
@@ -543,13 +559,15 @@ defmodule Prehen.Agent.Session do
     |> persist_memory_turn(%{
       status: :ok,
       answer: answer,
-      raw_result: result
+      raw_result: result,
+      working_context: working_context
     })
     |> clear_active()
   end
 
   defp finalize_turn(state, {:error, reason}) do
     partial = get_in(state, [:active, :partial_message]) || ""
+    working_context = %{last_turn_status: :error, last_error: inspect(reason)}
 
     state =
       state
@@ -568,6 +586,13 @@ defmodule Prehen.Agent.Session do
         outcome: :failed,
         reason: reason
       })
+      |> emit_turn_summary(%{
+        input: state.active.item.text,
+        answer: partial,
+        status: :error,
+        tool_calls: summarize_tool_states(state.active.tool_states),
+        working_context: working_context
+      })
       |> store_message(%{
         role: :assistant,
         content: partial,
@@ -585,7 +610,8 @@ defmodule Prehen.Agent.Session do
       |> persist_memory_turn(%{
         status: :error,
         reason: reason,
-        answer: partial
+        answer: partial,
+        working_context: working_context
       })
 
     clear_active(state)
@@ -618,6 +644,10 @@ defmodule Prehen.Agent.Session do
     else
       emit(state, "ai.llm.response", %{call_id: call_id, result: result})
     end
+  end
+
+  defp emit_turn_summary(state, payload) when is_map(payload) do
+    emit(state, "ai.session.turn.summary", payload)
   end
 
   defp maybe_emit_skipped_tool_results(%{active: %{interrupted?: true} = active} = state) do
@@ -692,10 +722,10 @@ defmodule Prehen.Agent.Session do
     correlation = correlation_fields(state)
     event = EventBridge.project(type, Map.merge(correlation, payload))
 
-    _ =
-      Prehen.Conversation.Store.write(state.session_id, Map.put(event, :kind, :event))
-
-    %{state | events: state.events ++ [event]}
+    case Prehen.Conversation.Store.write(state.session_id, Map.put(event, :kind, :event)) do
+      {:ok, _record} -> %{state | events: state.events ++ [event]}
+      {:error, _reason} -> state
+    end
   end
 
   defp correlation_fields(%{session_id: session_id, active: nil}) do
@@ -793,24 +823,80 @@ defmodule Prehen.Agent.Session do
 
   defp map_get(_, _key, default), do: default
 
+  defp resolve_session_id(config) do
+    case Map.get(config, :session_id) do
+      session_id when is_binary(session_id) and session_id != "" -> session_id
+      _ -> gen_id("session")
+    end
+  end
+
+  defp normalize_non_neg_int(value, _fallback) when is_integer(value) and value >= 0, do: value
+  defp normalize_non_neg_int(_value, fallback), do: fallback
+
   defp gen_id(prefix) do
     "#{prefix}_#{System.unique_integer([:positive])}"
   end
 
-  defp canonical_trace(session_id, fallback) do
-    case Prehen.Conversation.Store.replay(session_id, kind: :event) do
-      [] ->
-        fallback
-
-      records ->
+  defp canonical_trace(session_id, _fallback) do
+    case Prehen.Conversation.Store.replay_result(session_id, kind: :event) do
+      {:ok, records} ->
         Enum.map(records, fn record ->
           Map.drop(record, [:kind, :stored_at_ms])
         end)
+
+      {:error, _reason} ->
+        []
     end
   rescue
-    _ -> fallback
+    _ -> []
   catch
-    :exit, _ -> fallback
+    :exit, _ -> []
+  end
+
+  defp maybe_restore_from_ledger(state) do
+    if resume_requested?(state.config) do
+      case Prehen.Conversation.Store.replay_result(state.session_id) do
+        {:ok, records} ->
+          with {:ok, _projection} <-
+                 Memory.rebuild_session(state.session_id, records, memory_opts(state.config)) do
+            turn_seq = max(state.turn_seq, max_turn_seq(records))
+
+            recovered_state =
+              state
+              |> Map.put(:turn_seq, turn_seq)
+              |> emit("ai.session.recovered", %{
+                turn_seq: turn_seq,
+                replayed_records: length(records)
+              })
+
+            {:ok, recovered_state}
+          else
+            {:error, reason} ->
+              {:error, {:session_recovery_failed, state.session_id, reason}}
+          end
+
+        {:error, reason} ->
+          {:error, {:session_recovery_failed, state.session_id, reason}}
+      end
+    else
+      {:ok, state}
+    end
+  end
+
+  defp resume_requested?(config) do
+    Map.get(config, :resume, false) == true
+  end
+
+  defp max_turn_seq(records) do
+    Enum.reduce(records, 0, fn record, acc ->
+      turn_id = map_get(record, :turn_id)
+
+      if is_integer(turn_id) and turn_id > acc do
+        turn_id
+      else
+        acc
+      end
+    end)
   end
 
   defp maybe_init_memory_session(state) do
@@ -846,8 +932,10 @@ defmodule Prehen.Agent.Session do
       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
       |> Map.new()
 
-    _ = Prehen.Conversation.Store.write(state.session_id, record)
-    state
+    case Prehen.Conversation.Store.write(state.session_id, record) do
+      {:ok, _record} -> state
+      {:error, _reason} -> state
+    end
   rescue
     _ -> state
   catch

@@ -1,6 +1,8 @@
 defmodule Prehen.Workspace.SessionManagerTest do
   use ExUnit.Case
 
+  alias Prehen.Conversation.SessionLedger
+
   defp session_opts(extra) do
     base = [
       agent_backend: Prehen.Agent.Backends.JidoAI,
@@ -72,6 +74,53 @@ defmodule Prehen.Workspace.SessionManagerTest do
 
     assert {:ok, status} = Prehen.session_status(session.session_pid)
     assert status.capability_packs == []
+  end
+
+  test "can resume historical session in the same workspace" do
+    opts = session_opts(workspace_id: "ws-resume")
+    {:ok, session} = Prehen.create_session(opts)
+    assert {:ok, _} = Prehen.submit_message(session.session_pid, "first resume turn")
+    assert {:ok, _} = Prehen.await_result(session.session_pid, timeout: 3_000)
+
+    session_id = session.session_id
+    assert :ok = Prehen.stop_session(session.session_pid)
+
+    {:ok, resumed} = Prehen.resume_session(session_id, opts)
+
+    on_exit(fn ->
+      if Process.alive?(resumed.session_pid), do: Prehen.stop_session(resumed.session_pid)
+    end)
+
+    assert resumed.session_id == session_id
+    assert {:ok, _} = Prehen.submit_message(resumed.session_pid, "second resume turn")
+    assert {:ok, result} = Prehen.await_result(resumed.session_pid, timeout: 3_000)
+
+    assert Enum.any?(result.trace, fn event -> event.type == "ai.session.recovered" end)
+
+    assert Enum.any?(result.trace, fn event ->
+             event.type == "ai.session.turn.started" and event.turn_id == 2
+           end)
+  end
+
+  test "idle reclaim releases process but keeps ledger file for later recovery" do
+    opts = session_opts(workspace_id: "ws-reclaim-ledger", session_idle_ttl_ms: 150)
+    {:ok, session} = Prehen.create_session(opts)
+
+    assert {:ok, _} = Prehen.submit_message(session.session_pid, "persist me")
+    assert {:ok, _} = Prehen.await_result(session.session_pid, timeout: 3_000)
+
+    ledger_file = SessionLedger.session_file(session.session_id)
+
+    assert wait_until(fn -> not Process.alive?(session.session_pid) end, 5_000)
+    assert File.exists?(ledger_file)
+
+    {:ok, resumed} = Prehen.resume_session(session.session_id, opts)
+
+    on_exit(fn ->
+      if Process.alive?(resumed.session_pid), do: Prehen.stop_session(resumed.session_pid)
+    end)
+
+    assert resumed.session_id == session.session_id
   end
 
   test "start_session validates capability allowlist and unknown packs" do

@@ -1,4 +1,4 @@
-## Requirements
+## ADDED Requirements
 
 ### Requirement: STM 重建输入契约
 系统 MUST 定义可用于 STM 重建的回合摘要输入契约，并保证恢复流程可消费该契约。
@@ -14,6 +14,8 @@
 - **WHEN** 系统恢复某历史 session 且 LTM adapter 不可用
 - **THEN** 系统 SHALL 仍可基于 ledger 完成 STM 重建并继续会话
 
+## MODIFIED Requirements
+
 ### Requirement: Session 级 STM 管理
 系统 MUST 为每个 session 维护独立 short-term memory（STM），包括对话缓冲、工作上下文与 token 预算；STM SHALL 作为内存态工作集，并可由持久化 ledger 重建。
 
@@ -24,20 +26,6 @@
 #### Scenario: 系统重启后恢复 STM
 - **WHEN** 系统重启并恢复某历史 `session_id`
 - **THEN** 系统 SHALL 通过 ledger 回放重建该 session 的 STM 状态
-
-### Requirement: 通用 LTM Adapter Contract
-系统 MUST 定义 long-term memory（LTM）的通用接口契约，并允许本地或远端实现接入。
-
-#### Scenario: LTM 接口兼容性 contract test（mock/stub）
-- **WHEN** 测试环境使用 mock/stub adapters 分别实现同一组 LTM 接口
-- **THEN** 上层编排逻辑 SHALL 在不修改调用代码的前提下通过同一 contract 完成读写与错误处理验证
-
-### Requirement: LTM 接口先行而非具体实现
-系统 MUST 在本次变更中仅落地 LTM 接口与调用边界，不实现具体检索与持久化逻辑。
-
-#### Scenario: 当前阶段调用 LTM 能力
-- **WHEN** Orchestrator 触发 LTM 读取或写入流程
-- **THEN** 系统 SHALL 通过约定接口返回可诊断结果，并且 SHALL NOT 依赖已落地的具体 LTM 存储实现（以 contract test 覆盖兼容性）
 
 ### Requirement: Memory 读取策略
 系统 MUST 采用“STM 主、LTM 补充”的读取策略，保证短期上下文优先；若会话由恢复路径进入，系统 SHALL 先完成 STM 重建再执行读取拼装。

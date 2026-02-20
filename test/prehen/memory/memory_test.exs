@@ -59,6 +59,53 @@ defmodule Prehen.MemoryTest do
     assert length(context.stm.conversation_buffer) == 1
   end
 
+  test "rebuild_session reconstructs stm from turn summaries" do
+    session_id = unique_session_id("rebuild")
+
+    records = [
+      %{
+        session_id: session_id,
+        seq: 1,
+        kind: :event,
+        type: "ai.session.turn.summary",
+        at_ms: 1,
+        stored_at_ms: 1,
+        turn_id: 1,
+        input: "hello",
+        answer: "world",
+        status: :ok,
+        tool_calls: [],
+        working_context: %{topic: "memory"}
+      },
+      %{
+        session_id: session_id,
+        seq: 2,
+        kind: :event,
+        type: "ai.session.turn.summary",
+        at_ms: 2,
+        stored_at_ms: 2,
+        turn_id: 2,
+        input: "follow",
+        answer: "up",
+        status: :ok,
+        tool_calls: [%{call_id: "tool_1"}],
+        working_context: %{last_answer: "up"}
+      }
+    ]
+
+    assert {:ok, rebuilt} =
+             Memory.rebuild_session(session_id, records, buffer_limit: 10, token_budget_limit: 64)
+
+    assert rebuilt.turn_seq == 2
+    assert rebuilt.summary_count == 2
+    assert rebuilt.stm.token_budget.limit == 64
+
+    assert {:ok, context} = Memory.context(session_id)
+    assert length(context.stm.conversation_buffer) == 2
+    assert context.stm.working_context.topic == "memory"
+    assert context.stm.working_context.last_answer == "up"
+  end
+
   defp unique_session_id(prefix) do
     "#{prefix}_#{System.unique_integer([:positive])}"
   end

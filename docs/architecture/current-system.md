@@ -16,7 +16,7 @@ _Last updated: 2026-02-20_
 3. `Prehen.Agent.Runtime`（runtime facade）
 4. `Prehen.Workspace.SessionManager`（control plane）
 5. `Prehen.Agent.Session`（data plane）
-6. `Prehen.Conversation.Store` + `Prehen.Memory`（事实流与记忆）
+6. `Prehen.Conversation.Store` + `SessionLedger` + `Prehen.Memory`（事实流与记忆）
 
 简化关系图：
 
@@ -39,7 +39,9 @@ Prehen.Agent.Runtime
     |                 |
     |                 +--> Prehen.Agent.Session (one process per session)
     |
-    +--> Prehen.Conversation.Store (canonical event/message stream)
+    +--> Prehen.Conversation.Store (ledger-first event/message stream facade)
+    |        |
+    |        +--> Session ledger files (`./.prehen/sessions/<session_id>.jsonl`)
     +--> Prehen.Memory (STM + LTM adapter contract)
 ```
 
@@ -71,14 +73,16 @@ Prehen.Agent.Runtime
 - 回合边界写入 `Memory`（STM 主，LTM 可降级）。
 
 ### 2.6 `Prehen.Conversation.Store`（canonical facts）
-- append-only 事实流（event + message）。
-- 每条记录分配 `seq`，支持按条件 replay。
-- 每次写入发布到 `ProjectionSupervisor`（供订阅方消费）。
+- append-only 事实流 facade（event + message）。
+- 每条记录分配 `seq` 并持久化到 `session_id.jsonl`。
+- 语义为 persist-first（含 turn completed `file.sync` checkpoint）再 publish。
+- replay 从持久化 ledger 读取；支持重启后回放。
 
 ### 2.7 `Prehen.Memory`（two-tier memory）
 - STM：`session_id` 级短期记忆（`conversation_buffer`、`working_context`、`token_budget`）。
 - LTM：通过 adapter contract 接口扩展；当前默认 `noop`。
 - 读取策略：STM-first，LTM 失败降级不阻塞主流程。
+- STM 可通过回放 `ai.session.turn.summary` 从 ledger 重建。
 
 ## 3. 核心数据处理流程
 
@@ -150,7 +154,8 @@ sequenceDiagram
 1. `Store.write/*` 写入记录时同步 publish 到 `ProjectionSupervisor`。
 2. 实时消费：`Events.subscribe/1`（`Surface.subscribe_events/1` 对外暴露）。
 3. 历史回放：`Store.replay/2`（`Runtime.replay_session/2` / `Surface.replay_session/2` 暴露）。
-4. `Session` 在构建最终 runtime result 时，优先使用 `Store.replay(kind: :event)` 生成 canonical trace。
+4. 会话恢复：`resume_session` -> replay ledger -> 重建 STM -> 发出 `ai.session.recovered`。
+5. `Session` 在构建最终 runtime result 时使用 ledger replay 生成 canonical trace。
 
 ### 3.3 Memory 读取流程（Orchestrator 场景）
 
@@ -206,6 +211,9 @@ sequenceDiagram
 - 安全：MVP 阶段客户端直连，不包含认证/鉴权。
 - 兼容策略：采用一次性切换，不维护长期双轨兼容。
 - `trace_json`：当前以 `schema_version: 2` 为统一结构。
+- ledger 默认目录：`./.prehen/sessions`。
+- ledger 权限策略：目录 `0700`、文件 `0600`。
+- 损坏 ledger 在恢复路径为硬失败（返回结构化恢复错误）。
 
 ## 6. 为什么会感到“复杂”
 
@@ -236,17 +244,19 @@ sequenceDiagram
 | 层/主题 | 模块 | 源码文件 | 关键入口 | 说明 |
 |---|---|---|---|---|
 | Public API | `Prehen` | `lib/prehen.ex` | `run/2`, `create_session/1`, `submit_message/3` | 平台统一入口，转发到 `Surface` |
-| Client Surface | `Prehen.Client.Surface` | `lib/prehen/client/surface.ex` | `create_session/1`, `await_result/2`, `subscribe_events/1` | 给 CLI/Web/Native 提供统一 contract |
-| Runtime Facade | `Prehen.Agent.Runtime` | `lib/prehen/agent/runtime.ex` | `start_session/1`, `session_status/1`, `replay_session/2` | 隐藏会话内部编排细节 |
+| Client Surface | `Prehen.Client.Surface` | `lib/prehen/client/surface.ex` | `create_session/1`, `resume_session/2`, `await_result/2`, `subscribe_events/1` | 给 CLI/Web/Native 提供统一 contract |
+| Runtime Facade | `Prehen.Agent.Runtime` | `lib/prehen/agent/runtime.ex` | `start_session/1`, `resume_session/2`, `session_status/1`, `replay_session/2` | 隐藏会话内部编排细节 |
 | Control Plane | `Prehen.Workspace.SessionManager` | `lib/prehen/workspace/session_manager.ex` | `start_session/2`, `list_sessions/1`, `set_workspace_capability_packs/2` | 会话元数据、workspace 策略、回收 |
 | Session Proc Supervision | `Prehen.Workspace.SessionSupervisor` | `lib/prehen/workspace/session_supervisor.ex` | `start_session/2`, `stop_session/1` | 负责 `Session` 子进程生命周期 |
 | Data Plane | `Prehen.Agent.Session` | `lib/prehen/agent/session.ex` | `prompt/3`, `steer/3`, `await_idle/2`, `snapshot/1` | 单会话执行引擎、队列与回合调度 |
 | Event Projection | `Prehen.Agent.EventBridge` | `lib/prehen/agent/event_bridge.ex` | `project/2` | 统一 event envelope 结构 |
-| Canonical Facts | `Prehen.Conversation.Store` | `lib/prehen/conversation/store.ex` | `write/2`, `write_many/2`, `replay/2` | append-only 事实流（event/message） |
+| Canonical Facts | `Prehen.Conversation.Store` | `lib/prehen/conversation/store.ex` | `write/2`, `write_many/2`, `replay/2` | ledger-first 事实流 facade（event/message） |
+| Session Ledger | `Prehen.Conversation.SessionLedger` | `lib/prehen/conversation/session_ledger.ex` | `append/2`, `replay/1`, `sync/1` | 文件持久化 `<session_id>.jsonl` 与回放/校验 |
 | Event Facade | `Prehen.Events` | `lib/prehen/events.ex` | `subscribe/1`, `replay/2` | 对客户端暴露订阅与回放 |
 | Projection Bus | `Prehen.Events.ProjectionSupervisor` | `lib/prehen/events/projection_supervisor.ex` | `publish/1`, `subscribe/1` | 事件分发给投影消费者 |
 | Memory Facade | `Prehen.Memory` | `lib/prehen/memory.ex` | `context/2`, `record_turn/3`, `put_working_context/3` | Two-tier memory 门面（STM + LTM contract） |
 | STM | `Prehen.Memory.STM` | `lib/prehen/memory/stm.ex` | `ensure_session/2`, `record_turn/3`, `put_working_context/3` | 会话级短期记忆 |
+| STM Projector | `Prehen.Memory.STMProjector` | `lib/prehen/memory/stm_projector.ex` | `rebuild/3` | 从 summary 事件回放重建 STM |
 | LTM Adapter Registry | `Prehen.Memory.LTMAdapters` | `lib/prehen/memory/ltm_adapters.ex` | `register/2`, `fetch/1` | LTM adapter 注册与解析 |
 | LTM Contract | `Prehen.Memory.LTM.Adapter` | `lib/prehen/memory/ltm/adapter.ex` | `get/2`, `put/3` callbacks | 长期记忆接口契约（MVP 暂不实现默认持久化） |
 | Orchestration | `Prehen.Agent.Orchestrator` | `lib/prehen/agent/orchestrator.ex` | `route/2`, `dispatch/2` | 多 Agent 路由/派发（读取并写回 Memory） |

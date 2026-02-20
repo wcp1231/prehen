@@ -74,6 +74,15 @@ defmodule Prehen.Memory.STM do
   end
 
   @doc """
+  重置某个会话的 STM 状态（用于恢复流程重建）。
+  Reset session STM state (used by recovery rebuild flow).
+  """
+  @spec reset_session(String.t(), keyword()) :: {:ok, session_memory()}
+  def reset_session(session_id, opts \\ []) when is_binary(session_id) and is_list(opts) do
+    GenServer.call(__MODULE__, {:reset_session, session_id, opts})
+  end
+
+  @doc """
   写入一轮会话 turn，并更新 budget/working context。
   Record one turn and refresh budget/working context.
   """
@@ -128,6 +137,17 @@ defmodule Prehen.Memory.STM do
   def handle_call({:ensure_session, session_id, opts}, _from, state) do
     {memory, next_state} = ensure_session_memory(state, session_id, opts)
     {:reply, {:ok, memory}, next_state}
+  end
+
+  def handle_call({:reset_session, session_id, opts}, _from, state) do
+    memory =
+      new_session_memory(
+        Keyword.get(opts, :buffer_limit, state.default_buffer_limit),
+        Keyword.get(opts, :token_budget_limit, state.default_token_budget_limit)
+      )
+
+    next_sessions = Map.put(state.sessions, session_id, memory)
+    {:reply, {:ok, memory}, %{state | sessions: next_sessions}}
   end
 
   def handle_call({:record_turn, session_id, turn, opts}, _from, state) do

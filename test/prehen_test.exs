@@ -101,4 +101,29 @@ defmodule PrehenTest do
     assert Enum.any?(records, &(&1.kind == :event and &1.type == "ai.request.started"))
     assert Enum.any?(records, &(&1.kind == :message and &1.role == :user))
   end
+
+  test "public api exposes resume_session and keeps session continuity" do
+    opts = Keyword.put(session_opts(), :workspace_id, "ws-public-resume")
+    {:ok, created} = Prehen.create_session(opts)
+
+    assert {:ok, _} = Prehen.submit_message(created.session_pid, "public first")
+    assert {:ok, _} = Prehen.await_result(created.session_pid, timeout: 3_000)
+    assert :ok = Prehen.stop_session(created.session_pid)
+
+    {:ok, resumed} = Prehen.resume_session(created.session_id, opts)
+
+    on_exit(fn ->
+      if Process.alive?(resumed.session_pid), do: Prehen.stop_session(resumed.session_pid)
+    end)
+
+    assert resumed.session_id == created.session_id
+    assert {:ok, _} = Prehen.submit_message(resumed.session_pid, "public second")
+    assert {:ok, result} = Prehen.await_result(resumed.session_pid, timeout: 3_000)
+
+    assert Enum.any?(result.trace, fn event -> event.type == "ai.session.recovered" end)
+
+    assert Enum.any?(result.trace, fn event ->
+             event.type == "ai.session.turn.started" and event.turn_id == 2
+           end)
+  end
 end

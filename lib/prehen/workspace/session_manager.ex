@@ -54,6 +54,14 @@ defmodule Prehen.Workspace.SessionManager do
     GenServer.call(__MODULE__, {:start_session, config, opts})
   end
 
+  @spec resume_session(String.t(), map(), keyword()) ::
+          {:ok, %{pid: pid(), session_id: String.t(), workspace_id: String.t()}}
+          | {:error, term()}
+  def resume_session(session_id, config, opts \\ [])
+      when is_binary(session_id) and is_map(config) do
+    GenServer.call(__MODULE__, {:resume_session, session_id, config, opts})
+  end
+
   @spec stop_session(pid()) :: :ok | {:error, :not_found}
   def stop_session(session_pid) when is_pid(session_pid) do
     GenServer.call(__MODULE__, {:stop_session, session_pid})
@@ -67,6 +75,11 @@ defmodule Prehen.Workspace.SessionManager do
   @spec get_session(pid()) :: {:ok, session_record()} | {:error, :not_found}
   def get_session(session_pid) when is_pid(session_pid) do
     GenServer.call(__MODULE__, {:get_session, session_pid})
+  end
+
+  @spec get_session_by_id(String.t()) :: {:ok, session_record()} | {:error, :not_found}
+  def get_session_by_id(session_id) when is_binary(session_id) do
+    GenServer.call(__MODULE__, {:get_session_by_id, session_id})
   end
 
   @spec set_workspace_capability_packs(String.t(), [atom()]) :: :ok | {:error, term()}
@@ -102,50 +115,37 @@ defmodule Prehen.Workspace.SessionManager do
   @impl true
   def handle_call({:start_session, config, opts}, _from, state) do
     workspace_id = opts |> Keyword.get(:workspace_id, @default_workspace) |> to_string()
-    start_opts = Keyword.take(opts, [:name])
-    now = System.system_time(:millisecond)
 
-    with {:ok, session_config, capability_packs, capability_allowlist} <-
-           resolve_session_capabilities(state, config, workspace_id, opts),
-         {:ok, session_pid} <- SessionSupervisor.start_session(session_config, start_opts),
-         snapshot <- Session.snapshot(session_pid),
-         true <- is_binary(snapshot.session_id) do
-      ref = Process.monitor(session_pid)
-      queue_empty? = queue_empty?(snapshot)
-      lifecycle = SessionLifecycle.evolve(:created, snapshot.status, queue_empty?)
+    case start_managed_session(state, config, workspace_id, opts) do
+      {:ok, reply, next_state} -> {:reply, {:ok, reply}, next_state}
+      {:error, reason, next_state} -> {:reply, {:error, reason}, next_state}
+    end
+  end
 
-      record = %{
-        session_id: snapshot.session_id,
-        workspace_id: workspace_id,
-        pid: session_pid,
-        inserted_at_ms: now,
-        status: snapshot.status,
-        lifecycle: lifecycle,
-        last_active_at_ms: now,
-        idle_since_at_ms: if(lifecycle == :idle, do: now, else: nil),
-        last_snapshot_at_ms: now,
-        idle_ttl_ms: idle_ttl_ms(config, opts),
-        capability_packs: capability_packs,
-        capability_allowlist: capability_allowlist
-      }
+  def handle_call({:resume_session, session_id, config, opts}, _from, state) do
+    workspace_id = opts |> Keyword.get(:workspace_id, @default_workspace) |> to_string()
 
-      next_state = %{
-        state
-        | sessions: Map.put(state.sessions, session_pid, record),
-          monitors: Map.put(state.monitors, ref, session_pid)
-      }
+    case find_session_record_by_id(state.sessions, session_id) do
+      {:ok, record} ->
+        reply = %{
+          pid: record.pid,
+          session_id: record.session_id,
+          workspace_id: record.workspace_id,
+          capability_packs: record.capability_packs
+        }
 
-      reply = %{
-        pid: session_pid,
-        session_id: record.session_id,
-        workspace_id: workspace_id,
-        capability_packs: capability_packs
-      }
+        {:reply, {:ok, reply}, state}
 
-      {:reply, {:ok, reply}, next_state}
-    else
-      {:error, reason} -> {:reply, {:error, reason}, state}
-      _ -> {:reply, {:error, :invalid_session_snapshot}, state}
+      :error ->
+        session_config =
+          config
+          |> Map.put(:session_id, session_id)
+          |> Map.put(:resume, true)
+
+        case start_managed_session(state, session_config, workspace_id, opts) do
+          {:ok, reply, next_state} -> {:reply, {:ok, reply}, next_state}
+          {:error, reason, next_state} -> {:reply, {:error, reason}, next_state}
+        end
     end
   end
 
@@ -175,6 +175,13 @@ defmodule Prehen.Workspace.SessionManager do
 
   def handle_call({:get_session, session_pid}, _from, state) do
     case Map.fetch(state.sessions, session_pid) do
+      {:ok, record} -> {:reply, {:ok, record}, state}
+      :error -> {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  def handle_call({:get_session_by_id, session_id}, _from, state) do
+    case find_session_record_by_id(state.sessions, session_id) do
       {:ok, record} -> {:reply, {:ok, record}, state}
       :error -> {:reply, {:error, :not_found}, state}
     end
@@ -310,6 +317,64 @@ defmodule Prehen.Workspace.SessionManager do
     cond do
       is_integer(ttl) and ttl > 0 -> ttl
       true -> @default_idle_ttl_ms
+    end
+  end
+
+  defp start_managed_session(state, config, workspace_id, opts) do
+    start_opts = Keyword.take(opts, [:name])
+    now = System.system_time(:millisecond)
+
+    with {:ok, session_config, capability_packs, capability_allowlist} <-
+           resolve_session_capabilities(state, config, workspace_id, opts),
+         {:ok, session_pid} <- SessionSupervisor.start_session(session_config, start_opts),
+         snapshot <- Session.snapshot(session_pid),
+         true <- is_binary(snapshot.session_id) do
+      ref = Process.monitor(session_pid)
+      queue_empty? = queue_empty?(snapshot)
+      lifecycle = SessionLifecycle.evolve(:created, snapshot.status, queue_empty?)
+
+      record = %{
+        session_id: snapshot.session_id,
+        workspace_id: workspace_id,
+        pid: session_pid,
+        inserted_at_ms: now,
+        status: snapshot.status,
+        lifecycle: lifecycle,
+        last_active_at_ms: now,
+        idle_since_at_ms: if(lifecycle == :idle, do: now, else: nil),
+        last_snapshot_at_ms: now,
+        idle_ttl_ms: idle_ttl_ms(config, opts),
+        capability_packs: capability_packs,
+        capability_allowlist: capability_allowlist
+      }
+
+      next_state = %{
+        state
+        | sessions: Map.put(state.sessions, session_pid, record),
+          monitors: Map.put(state.monitors, ref, session_pid)
+      }
+
+      reply = %{
+        pid: session_pid,
+        session_id: record.session_id,
+        workspace_id: workspace_id,
+        capability_packs: capability_packs
+      }
+
+      {:ok, reply, next_state}
+    else
+      {:error, reason} -> {:error, reason, state}
+      _ -> {:error, :invalid_session_snapshot, state}
+    end
+  end
+
+  defp find_session_record_by_id(sessions, session_id) do
+    sessions
+    |> Map.values()
+    |> Enum.find(fn record -> record.session_id == session_id end)
+    |> case do
+      nil -> :error
+      record -> {:ok, record}
     end
   end
 

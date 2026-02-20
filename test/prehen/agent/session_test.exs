@@ -2,6 +2,17 @@ defmodule Prehen.Agent.SessionTest do
   use ExUnit.Case
 
   alias Prehen.Agent.Session
+  alias Prehen.Conversation.SessionLedger
+
+  defmodule FailingLTMAdapter do
+    @behaviour Prehen.Memory.LTM.Adapter
+
+    @impl true
+    def get(_session_id, _query), do: {:error, :ltm_unavailable}
+
+    @impl true
+    def put(_session_id, _entry, _meta), do: {:error, :ltm_unavailable}
+  end
 
   defp base_config do
     %{
@@ -124,5 +135,110 @@ defmodule Prehen.Agent.SessionTest do
            end)
 
     assert context.stm.token_budget.used > 0
+  end
+
+  test "writes ai.session.turn.summary with normalized fields" do
+    {:ok, session} = Session.start(base_config())
+    on_exit(fn -> Session.stop(session) end)
+
+    assert {:ok, _} = Session.prompt(session, "summary please")
+    assert {:ok, _} = Session.await_idle(session, timeout: 3_000)
+
+    %{session_id: session_id} = Session.snapshot(session)
+
+    summary =
+      session_id
+      |> Prehen.Conversation.Store.replay(kind: :event)
+      |> Enum.find(fn record -> record.type == "ai.session.turn.summary" end)
+
+    assert summary.turn_id == 1
+    assert summary.input == "summary please"
+    assert summary.answer == "answer:summary please"
+    assert summary.status == :ok
+    assert is_list(summary.tool_calls)
+    assert is_map(summary.working_context)
+    assert Map.get(summary.working_context, "last_turn_status") == :ok
+  end
+
+  test "resume rebuilds stm and continues turn sequence" do
+    config = base_config()
+    {:ok, session} = Session.start(config)
+    assert {:ok, _} = Session.prompt(session, "first turn")
+    assert {:ok, _} = Session.await_idle(session, timeout: 3_000)
+
+    %{session_id: session_id} = Session.snapshot(session)
+    Session.stop(session)
+
+    resume_config =
+      config
+      |> Map.put(:session_id, session_id)
+      |> Map.put(:resume, true)
+
+    {:ok, resumed} = Session.start(resume_config)
+    on_exit(fn -> Session.stop(resumed) end)
+
+    assert {:ok, _} = Session.prompt(resumed, "second turn")
+    assert {:ok, result} = Session.await_idle(resumed, timeout: 3_000)
+
+    assert Enum.any?(result.trace, fn event -> event.type == "ai.session.recovered" end)
+
+    started_turn_ids =
+      result.trace
+      |> Enum.filter(&(&1.type == "ai.session.turn.started"))
+      |> Enum.map(& &1.turn_id)
+
+    assert Enum.max(started_turn_ids) == 2
+
+    assert {:ok, context} = Prehen.Memory.context(session_id)
+
+    assert Enum.any?(context.stm.conversation_buffer, fn turn ->
+             turn.input == "first turn"
+           end)
+
+    assert Enum.any?(context.stm.conversation_buffer, fn turn ->
+             turn.input == "second turn"
+           end)
+  end
+
+  test "resume hard fails on corrupt ledger" do
+    session_id = "broken_#{System.unique_integer([:positive])}"
+    ledger_file = SessionLedger.session_file(session_id)
+    File.mkdir_p!(Path.dirname(ledger_file))
+    File.write!(ledger_file, "{\"broken_json\"")
+
+    resume_config =
+      base_config()
+      |> Map.put(:session_id, session_id)
+      |> Map.put(:resume, true)
+
+    assert {:error, {:session_recovery_failed, ^session_id, {:ledger_corrupt, %{line: 1}}}} =
+             Session.start(resume_config)
+  end
+
+  test "resume keeps working when ltm adapter is unavailable" do
+    config =
+      base_config()
+      |> Map.put(:ltm_adapter, FailingLTMAdapter)
+
+    {:ok, session} = Session.start(config)
+    assert {:ok, _} = Session.prompt(session, "ltm first")
+    assert {:ok, _} = Session.await_idle(session, timeout: 3_000)
+    %{session_id: session_id} = Session.snapshot(session)
+    Session.stop(session)
+
+    resume_config =
+      config
+      |> Map.put(:session_id, session_id)
+      |> Map.put(:resume, true)
+
+    {:ok, resumed} = Session.start(resume_config)
+    on_exit(fn -> Session.stop(resumed) end)
+
+    assert {:ok, _} = Session.prompt(resumed, "ltm second")
+    assert {:ok, %{status: :ok}} = Session.await_idle(resumed, timeout: 3_000)
+
+    assert {:ok, context} = Prehen.Memory.context(session_id, ltm_adapter: FailingLTMAdapter)
+    assert context.source == :stm_ltm_degraded
+    assert Enum.any?(context.stm.conversation_buffer, fn turn -> turn.input == "ltm second" end)
   end
 end

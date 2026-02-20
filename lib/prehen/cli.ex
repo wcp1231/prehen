@@ -3,7 +3,7 @@ defmodule Prehen.CLI do
 
   @usage """
   Usage:
-    prehen run "<task>" [--max-steps N] [--timeout-ms N] [--root-dir PATH] [--model NAME] [--trace-json]
+    prehen run "<task>" [--session-id ID] [--max-steps N] [--timeout-ms N] [--root-dir PATH] [--model NAME] [--trace-json]
   """
 
   @spec main([String.t()]) :: {:ok, map()} | {:error, term()}
@@ -11,6 +11,7 @@ defmodule Prehen.CLI do
     {opts, args, _invalid} =
       OptionParser.parse(argv,
         strict: [
+          session_id: :string,
           max_steps: :integer,
           timeout_ms: :integer,
           root_dir: :string,

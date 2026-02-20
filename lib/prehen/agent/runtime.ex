@@ -46,6 +46,21 @@ defmodule Prehen.Agent.Runtime do
     end
   end
 
+  @spec resume_session(String.t(), keyword()) :: {:ok, pid()} | {:error, term()}
+  def resume_session(session_id, opts \\ []) when is_binary(session_id) do
+    config = Config.load(opts)
+    workspace_id = opts |> Keyword.get(:workspace_id, "default") |> to_string()
+
+    manager_opts =
+      [workspace_id: workspace_id] ++
+        Keyword.take(opts, [:name, :capability_packs, :capability_allowlist])
+
+    case SessionManager.resume_session(session_id, config, manager_opts) do
+      {:ok, %{pid: session_pid}} -> {:ok, session_pid}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   @spec stop_session(pid()) :: :ok
   def stop_session(session_pid) when is_pid(session_pid) do
     case SessionManager.stop_session(session_pid) do

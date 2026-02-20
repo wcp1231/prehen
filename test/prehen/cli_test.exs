@@ -91,4 +91,52 @@ defmodule Prehen.CLITest do
       refute Map.has_key?(event, "event")
     end)
   end
+
+  test "cli run supports --session-id resume with continuous trace" do
+    Application.put_env(:prehen, :agent_backend, Prehen.Agent.Backends.JidoAI)
+    Application.put_env(:prehen, :session_adapter, Prehen.Test.FakeSessionAdapter)
+
+    on_exit(fn ->
+      Application.delete_env(:prehen, :agent_backend)
+      Application.delete_env(:prehen, :session_adapter)
+    end)
+
+    first_output =
+      capture_io(fn ->
+        assert {:ok, %{status: :ok}} = Prehen.CLI.main(["run", "cli first", "--trace-json"])
+      end)
+
+    first_trace = decode_trace_json(first_output)
+    session_id = first_trace |> hd() |> Map.fetch!("session_id")
+
+    second_output =
+      capture_io(fn ->
+        assert {:ok, %{status: :ok}} =
+                 Prehen.CLI.main([
+                   "run",
+                   "cli second",
+                   "--session-id",
+                   session_id,
+                   "--trace-json"
+                 ])
+      end)
+
+    second_trace = decode_trace_json(second_output)
+
+    assert Enum.any?(second_trace, fn event -> event["type"] == "ai.session.recovered" end)
+
+    assert Enum.any?(second_trace, fn event ->
+             event["type"] == "ai.session.turn.started" and event["turn_id"] == 2
+           end)
+
+    assert Enum.all?(second_trace, fn event ->
+             event["session_id"] == session_id
+           end)
+  end
+
+  defp decode_trace_json(output) do
+    [_, trace_and_answer] = String.split(output, "Trace:\n", parts: 2)
+    [trace_json, _answer] = String.split(trace_and_answer, "\nAnswer:\n", parts: 2)
+    Jason.decode!(String.trim(trace_json))
+  end
 end

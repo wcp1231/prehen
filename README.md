@@ -45,7 +45,7 @@ mix prehen.run "列出 lib 并读取 prehen.ex"
 ## CLI Options
 
 ```text
-prehen run "<task>" [--max-steps N] [--timeout-ms N] [--root-dir PATH] [--model NAME] [--trace-json]
+prehen run "<task>" [--session-id ID] [--max-steps N] [--timeout-ms N] [--root-dir PATH] [--model NAME] [--trace-json]
 ```
 
 ## Configuration
@@ -60,6 +60,7 @@ prehen run "<task>" [--max-steps N] [--timeout-ms N] [--root-dir PATH] [--model 
 - `PREHEN_STM_BUFFER_LIMIT`：STM 对话缓冲区最大回合数（默认 `24`）
 - `PREHEN_STM_TOKEN_BUDGET`：STM token 预算上限（默认 `8000`，估算值）
 - `PREHEN_LTM_ADAPTER`：LTM adapter 名称（默认 `noop`，本次仅接口）
+- `PREHEN_SESSION_LEDGER_DIR`：session ledger 目录（默认 `./.prehen/sessions`）
 - `PREHEN_CAPABILITY_PACKS`：默认启用的 capability packs（逗号分隔，默认 `local_fs`）
 - `PREHEN_WORKSPACE_CAPABILITY_ALLOWLIST`：workspace 允许的 capability packs（逗号分隔，默认 `local_fs`）
 - `PREHEN_ROOT_DIR`：工具允许访问的根目录（默认当前目录）
@@ -102,11 +103,19 @@ prehen run "<task>" [--max-steps N] [--timeout-ms N] [--root-dir PATH] [--model 
 
 统一会话 API（用于 CLI/Web/Native）：
 - `Prehen.Client.Surface.create_session/1`
+- `Prehen.Client.Surface.resume_session/2`
 - `Prehen.Client.Surface.submit_message/3`
 - `Prehen.Client.Surface.session_status/1`
 - `Prehen.Client.Surface.await_result/2`
 - `Prehen.Client.Surface.stop_session/1`
 - `Prehen.Client.Surface.subscribe_events/1`
+
+## Session Ledger
+
+- Session 历史事实源为 `session_id.jsonl`（默认目录 `./.prehen/sessions`）。
+- `Conversation.Store` 采用 ledger-first：先持久化、再发布 projection。
+- 回合完成事件（`ai.session.turn.completed`）会触发 durability checkpoint（`file.sync`）。
+- 恢复会话通过重放 ledger 实现，恢复成功会发出 `ai.session.recovered`。
 
 ## Security (MVP)
 

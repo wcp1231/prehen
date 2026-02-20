@@ -23,6 +23,11 @@ defmodule Prehen do
     Surface.create_session(opts)
   end
 
+  @spec resume_session(String.t(), keyword()) :: {:ok, map()} | {:error, map()}
+  def resume_session(session_id, opts \\ []) when is_binary(session_id) and is_list(opts) do
+    Surface.resume_session(session_id, opts)
+  end
+
   @spec submit_message(pid(), String.t(), keyword()) :: {:ok, map()} | {:error, map()}
   def submit_message(session_pid, text, opts \\ [])
       when is_pid(session_pid) and is_binary(text) do

@@ -5,33 +5,33 @@ defmodule Prehen.Conversation.Store do
   中文：
   - 按 `session_id` 维护统一事实流（event + message）。
   - 写入时自动分配顺序号 `seq`，支持按条件回放。
-  - 每次写入都会发布到 projection 总线供 CLI/日志/指标消费。
+  - 先持久化到 ledger，再发布到 projection 总线。
 
   English:
   - Canonical append-only store for session conversation/events.
   - Persists ordered records with per-session `seq`.
-  - Supports filtered replay and publishes records to projection consumers.
+  - Persists-first then publishes to projection consumers.
   """
 
   use GenServer
 
+  alias Prehen.Conversation.SessionLedger
   alias Prehen.Events.ProjectionSupervisor
 
   @type entry :: map()
   @type record :: map()
-  @type session_stream :: %{next_seq: pos_integer(), records: [record()]}
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, %{}, Keyword.put_new(opts, :name, __MODULE__))
   end
 
-  @spec write(String.t(), entry()) :: {:ok, record()}
+  @spec write(String.t(), entry()) :: {:ok, record()} | {:error, term()}
   def write(session_id, entry) when is_binary(session_id) and is_map(entry) do
     GenServer.call(__MODULE__, {:write, session_id, entry})
   end
 
-  @spec write_many(String.t(), [entry()]) :: {:ok, [record()]}
+  @spec write_many(String.t(), [entry()]) :: {:ok, [record()]} | {:error, term()}
   def write_many(session_id, entries) when is_binary(session_id) and is_list(entries) do
     GenServer.call(__MODULE__, {:write_many, session_id, entries})
   end
@@ -54,7 +54,20 @@ defmodule Prehen.Conversation.Store do
 
   @spec replay(String.t(), keyword()) :: [record()]
   def replay(session_id, opts \\ []) when is_binary(session_id) and is_list(opts) do
-    GenServer.call(__MODULE__, {:replay, session_id, opts})
+    case replay_result(session_id, opts) do
+      {:ok, records} -> records
+      {:error, _reason} -> []
+    end
+  end
+
+  @spec replay_result(String.t(), keyword()) :: {:ok, [record()]} | {:error, term()}
+  def replay_result(session_id, opts \\ []) when is_binary(session_id) and is_list(opts) do
+    GenServer.call(__MODULE__, {:replay_result, session_id, opts})
+  end
+
+  @spec replay_error(String.t()) :: {:ok, term()} | :none
+  def replay_error(session_id) when is_binary(session_id) do
+    GenServer.call(__MODULE__, {:replay_error, session_id})
   end
 
   @spec health() :: map()
@@ -67,49 +80,145 @@ defmodule Prehen.Conversation.Store do
   end
 
   @impl true
-  def init(state), do: {:ok, state}
+  def init(_state) do
+    {:ok, %{next_seq: %{}, replay_errors: %{}}}
+  end
 
   @impl true
   def handle_call({:write, session_id, entry}, _from, state) do
-    {record, next_state} = append_record(state, session_id, entry)
-    {:reply, {:ok, record}, next_state}
+    case append_record(state, session_id, entry) do
+      {:ok, record, next_state} ->
+        {:reply, {:ok, record}, next_state}
+
+      {:error, reason, next_state} ->
+        {:reply, {:error, reason}, next_state}
+    end
   end
 
   def handle_call({:write_many, session_id, entries}, _from, state) do
     normalized = Enum.filter(entries, &is_map/1)
 
-    {records, next_state} =
-      Enum.reduce(normalized, {[], state}, fn entry, {acc, acc_state} ->
-        {record, next} = append_record(acc_state, session_id, entry)
-        {[record | acc], next}
+    {result, next_state} =
+      Enum.reduce_while(normalized, {{:ok, []}, state}, fn entry, {{:ok, acc}, acc_state} ->
+        case append_record(acc_state, session_id, entry) do
+          {:ok, record, state_after_write} ->
+            {:cont, {{:ok, [record | acc]}, state_after_write}}
+
+          {:error, reason, state_after_write} ->
+            {:halt, {{:error, reason}, state_after_write}}
+        end
       end)
 
-    {:reply, {:ok, Enum.reverse(records)}, next_state}
+    case result do
+      {:ok, records} ->
+        {:reply, {:ok, Enum.reverse(records)}, next_state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, next_state}
+    end
   end
 
-  def handle_call({:replay, session_id, opts}, _from, state) do
-    stream = Map.get(state, session_id, empty_stream())
+  def handle_call({:replay_result, session_id, opts}, _from, state) do
+    case load_records(state, session_id) do
+      {:ok, records, next_state} ->
+        filtered =
+          records
+          |> filter_by_seq(Keyword.get(opts, :from_seq, 1))
+          |> filter_by_kind(Keyword.get(opts, :kind))
 
-    records =
-      stream.records
-      |> filter_by_seq(Keyword.get(opts, :from_seq, 1))
-      |> filter_by_kind(Keyword.get(opts, :kind))
+        {:reply, {:ok, filtered}, next_state}
 
-    {:reply, records, state}
+      {:error, reason, next_state} ->
+        {:reply, {:error, reason}, next_state}
+    end
+  end
+
+  def handle_call({:replay_error, session_id}, _from, state) do
+    case Map.fetch(state.replay_errors, session_id) do
+      {:ok, reason} -> {:reply, {:ok, reason}, state}
+      :error -> {:reply, :none, state}
+    end
   end
 
   defp append_record(state, session_id, entry) do
-    stream = Map.get(state, session_id, empty_stream())
-    record = build_record(stream.next_seq, session_id, entry)
+    with {:ok, seq, state_after_seq} <- resolve_next_seq(state, session_id),
+         record <- build_record(seq, session_id, entry),
+         {:ok, _record} <- SessionLedger.append(session_id, record),
+         :ok <- maybe_checkpoint(record),
+         :ok <- safe_publish(record) do
+      next_state =
+        state_after_seq
+        |> put_next_seq(session_id, seq + 1)
+        |> clear_replay_error(session_id)
 
-    next_stream = %{
-      next_seq: stream.next_seq + 1,
-      records: stream.records ++ [record]
-    }
+      {:ok, record, next_state}
+    else
+      {:error, reason} ->
+        {:error, reason, put_replay_error(state, session_id, reason)}
+    end
+  end
 
-    next_state = Map.put(state, session_id, next_stream)
-    safe_publish(record)
-    {record, next_state}
+  defp load_records(state, session_id) do
+    case SessionLedger.replay(session_id) do
+      {:ok, records} ->
+        next_seq =
+          case List.last(records) do
+            nil -> 1
+            record -> map_get(record, :seq, 0) + 1
+          end
+
+        next_state =
+          state
+          |> put_next_seq(session_id, next_seq)
+          |> clear_replay_error(session_id)
+
+        {:ok, records, next_state}
+
+      {:error, reason} ->
+        {:error, reason, put_replay_error(state, session_id, reason)}
+    end
+  end
+
+  defp resolve_next_seq(state, session_id) do
+    case Map.fetch(state.next_seq, session_id) do
+      {:ok, next_seq} ->
+        {:ok, next_seq, state}
+
+      :error ->
+        case load_records(state, session_id) do
+          {:ok, records, next_state} ->
+            seq =
+              case List.last(records) do
+                nil -> 1
+                record -> map_get(record, :seq, 0) + 1
+              end
+
+            {:ok, seq, next_state}
+
+          {:error, reason, next_state} ->
+            {:error, reason, next_state}
+        end
+    end
+  end
+
+  defp put_next_seq(state, session_id, next_seq) do
+    put_in(state, [:next_seq, session_id], next_seq)
+  end
+
+  defp put_replay_error(state, session_id, reason) do
+    put_in(state, [:replay_errors, session_id], reason)
+  end
+
+  defp clear_replay_error(state, session_id) do
+    %{state | replay_errors: Map.delete(state.replay_errors, session_id)}
+  end
+
+  defp maybe_checkpoint(record) do
+    if map_get(record, :type) == "ai.session.turn.completed" do
+      SessionLedger.sync(map_get(record, :session_id))
+    else
+      :ok
+    end
   end
 
   defp build_record(seq, session_id, entry) do
@@ -117,8 +226,8 @@ defmodule Prehen.Conversation.Store do
     normalized = normalize_entry(entry, now)
 
     normalized
-    |> Map.put_new(:session_id, session_id)
-    |> Map.put_new(:seq, seq)
+    |> Map.put(:session_id, session_id)
+    |> Map.put(:seq, seq)
     |> Map.put_new(:stored_at_ms, now)
     |> Enum.reject(fn {_k, v} -> is_nil(v) end)
     |> Map.new()
@@ -129,13 +238,18 @@ defmodule Prehen.Conversation.Store do
       cond do
         is_binary(map_get(entry, :type)) -> :event
         not is_nil(map_get(entry, :role)) -> :message
-        true -> map_get(entry, :kind, :record)
+        true -> normalize_kind(map_get(entry, :kind, :record))
       end
 
     entry
-    |> Map.put_new(:kind, kind)
+    |> Map.put(:kind, kind)
     |> Map.put_new(:at_ms, now)
   end
+
+  defp normalize_kind(kind) when kind in [:event, :message, :record], do: kind
+  defp normalize_kind("event"), do: :event
+  defp normalize_kind("message"), do: :message
+  defp normalize_kind(_), do: :record
 
   defp safe_publish(record) do
     _ = ProjectionSupervisor.publish(record)
@@ -146,18 +260,14 @@ defmodule Prehen.Conversation.Store do
     :exit, _ -> :ok
   end
 
-  defp empty_stream do
-    %{next_seq: 1, records: []}
-  end
-
   defp filter_by_seq(records, from_seq) when is_integer(from_seq) and from_seq > 1 do
-    Enum.filter(records, &(&1.seq >= from_seq))
+    Enum.filter(records, &(map_get(&1, :seq, 0) >= from_seq))
   end
 
   defp filter_by_seq(records, _from_seq), do: records
 
   defp filter_by_kind(records, kind) when kind in [:event, :message, :record] do
-    Enum.filter(records, &(&1.kind == kind))
+    Enum.filter(records, &(map_get(&1, :kind) == kind))
   end
 
   defp filter_by_kind(records, _kind), do: records

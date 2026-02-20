@@ -231,4 +231,14 @@ defmodule Prehen.Test.FakeSessionAdapter do
   end
 end
 
+ledger_dir =
+  Path.join(System.tmp_dir!(), "prehen_test_ledgers_#{System.unique_integer([:positive])}")
+
+File.mkdir_p!(ledger_dir)
+Application.put_env(:prehen, :session_ledger_dir, ledger_dir)
+
+ExUnit.after_suite(fn _ ->
+  File.rm_rf(ledger_dir)
+end)
+
 ExUnit.start()
