@@ -1,7 +1,8 @@
 defmodule Prehen.Conversation.SessionLedger do
   @moduledoc false
 
-  @default_dir "./.prehen/sessions"
+  alias Prehen.Workspace.Paths
+
   @default_dir_mode 0o700
   @default_file_mode 0o600
 
@@ -43,15 +44,15 @@ defmodule Prehen.Conversation.SessionLedger do
 
   @required_fields [:session_id, :seq, :kind, :at_ms, :stored_at_ms]
 
+  @spec workspace_dir() :: String.t()
+  def workspace_dir do
+    Paths.resolve_workspace_dir()
+  end
+
   @spec ledger_dir() :: String.t()
   def ledger_dir do
-    dir =
-      case Application.get_env(:prehen, :session_ledger_dir) do
-        nil -> System.get_env("PREHEN_SESSION_LEDGER_DIR") || @default_dir
-        value -> value
-      end
-
-    dir
+    workspace_dir()
+    |> Paths.sessions_dir()
     |> Path.expand()
   end
 
@@ -216,7 +217,8 @@ defmodule Prehen.Conversation.SessionLedger do
   end
 
   defp ensure_directory do
-    with :ok <- File.mkdir_p(ledger_dir()),
+    with :ok <- Paths.ensure_workspace_layout(workspace_dir()),
+         :ok <- File.mkdir_p(ledger_dir()),
          :ok <- ensure_mode(ledger_dir(), dir_mode()) do
       :ok
     end

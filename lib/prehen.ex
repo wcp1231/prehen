@@ -59,10 +59,9 @@ defmodule Prehen do
     Surface.replay_session(session_id, opts)
   end
 
-  @spec set_workspace_capability_packs(String.t(), [atom()]) :: :ok | {:error, term()}
-  def set_workspace_capability_packs(workspace_id, packs)
-      when is_binary(workspace_id) and is_list(packs) do
-    Surface.set_workspace_capability_packs(workspace_id, packs)
+  @spec set_capability_packs([atom()], keyword()) :: :ok | {:error, term()}
+  def set_capability_packs(packs, opts \\ []) when is_list(packs) and is_list(opts) do
+    Surface.set_capability_packs(packs, opts)
   end
 
   @spec subscribe_events(String.t()) :: {:ok, map()} | {:error, map()}

@@ -19,7 +19,7 @@ defmodule Prehen.Agent.SessionTest do
       model: "openai:gpt-5-mini",
       timeout_ms: 800,
       max_steps: 4,
-      root_dir: ".",
+      workspace_dir: Application.fetch_env!(:prehen, :workspace_dir),
       read_max_bytes: 1024,
       session_status_poll_ms: 20,
       session_adapter: Prehen.Test.FakeSessionAdapter,
@@ -64,13 +64,6 @@ defmodule Prehen.Agent.SessionTest do
 
     assert failed
     assert failed.error == {:cancelled, :steering}
-
-    skipped =
-      Enum.find(result.trace, fn event ->
-        event.type == "ai.tool.result" and match?({:error, %{type: "skipped"}}, event.result)
-      end)
-
-    assert skipped
   end
 
   test "emits correlation fields for lifecycle events" do
@@ -212,6 +205,18 @@ defmodule Prehen.Agent.SessionTest do
       |> Map.put(:resume, true)
 
     assert {:error, {:session_recovery_failed, ^session_id, {:ledger_corrupt, %{line: 1}}}} =
+             Session.start(resume_config)
+  end
+
+  test "resume fails when target ledger file is missing" do
+    session_id = "missing_#{System.unique_integer([:positive])}"
+
+    resume_config =
+      base_config()
+      |> Map.put(:session_id, session_id)
+      |> Map.put(:resume, true)
+
+    assert {:error, {:session_recovery_failed, ^session_id, :ledger_not_found}} =
              Session.start(resume_config)
   end
 

@@ -1,18 +1,18 @@
 ## Requirements
 
 ### Requirement: Workspace 支持多会话并发
-系统 MUST 支持单个 workspace 下并发运行多个 session。
+系统 MUST 支持单个已绑定 workspace 目录下并发运行多个 session。
 
-#### Scenario: 同一 workspace 并发创建多个 session
-- **WHEN** 客户端在同一个 `workspace_id` 下连续创建两个以上会话
+#### Scenario: 同一绑定 workspace 并发创建多个 session
+- **WHEN** 客户端在同一个进程绑定 workspace 下连续创建两个以上会话
 - **THEN** 系统 SHALL 为每个会话分配独立 `session_id` 并允许并发执行
 
 ### Requirement: 历史 Session 恢复能力
-系统 MUST 支持在同一 workspace 内按 `session_id` 恢复历史 session，并继续会话执行。
+系统 MUST 支持在当前进程绑定的 workspace 内按 `session_id` 恢复历史 session，并继续会话执行。
 
-#### Scenario: 在 workspace 中恢复历史 session
-- **WHEN** 客户端在某 `workspace_id` 下请求恢复历史 `session_id`
-- **THEN** 系统 SHALL 在该 workspace 中恢复对应会话并允许继续提交消息
+#### Scenario: 在绑定 workspace 中恢复历史 session
+- **WHEN** 客户端请求恢复历史 `session_id`
+- **THEN** 系统 SHALL 在当前绑定 workspace 中恢复对应会话并允许继续提交消息
 
 ### Requirement: 会话回收后保留 Ledger
 系统 MUST 在 session 停止或空闲回收后保留对应 ledger 文件，以支持后续恢复。
@@ -44,7 +44,7 @@
 - **THEN** 系统 SHALL 由 session 进程执行重放与状态重建，`SessionManager` 仅负责恢复入口与元数据编排
 
 ### Requirement: 会话隔离与资源边界
-系统 MUST 保证不同 session 之间的状态、队列、上下文与 ledger 文件严格隔离。
+系统 MUST 保证不同 session 之间的状态、队列、上下文与 ledger 文件严格隔离，且其 ledger 文件 SHALL 位于绑定 workspace 的 `.prehen/sessions` 目录中。
 
 #### Scenario: 并发会话互不污染
 - **WHEN** 两个 session 同时执行并接收不同消息队列
@@ -52,7 +52,11 @@
 
 #### Scenario: 持久化文件隔离
 - **WHEN** 两个 session 分别写入历史记录
-- **THEN** 系统 SHALL 将记录写入各自的 `<session_id>.jsonl`，不得出现跨文件污染
+- **THEN** 系统 SHALL 将记录写入各自的 `$WORKSPACE_DIR/.prehen/sessions/<session_id>.jsonl`，不得出现跨文件污染
+
+#### Scenario: 显式 workspace 覆盖与绑定冲突
+- **WHEN** 已绑定 workspace 的进程收到不同 workspace 路径的显式覆盖请求
+- **THEN** 系统 SHALL 返回 `workspace_mismatch` 错误并保持现有会话不受影响
 
 ### Requirement: 队列所有权归属 Session 编排层
 系统 MUST 将 `prompt / steering / follow-up` 的排队与中断语义统一到 Session 编排层。

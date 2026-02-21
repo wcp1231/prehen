@@ -10,7 +10,7 @@ defmodule Prehen.Agent.Backends.JidoAITest do
       base_url: nil,
       max_steps: 3,
       timeout_ms: 1_000,
-      root_dir: Path.expand("."),
+      workspace_dir: Application.fetch_env!(:prehen, :workspace_dir),
       read_max_bytes: 8_192
     }
 

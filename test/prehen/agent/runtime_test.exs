@@ -11,7 +11,6 @@ defmodule Prehen.Agent.RuntimeTest do
     assert {:ok, result} =
              Runtime.run("inspect files",
                agent_backend: Prehen.Test.MockBackend,
-               root_dir: ".",
                max_steps: 5
              )
 
@@ -54,8 +53,7 @@ defmodule Prehen.Agent.RuntimeTest do
       agent_backend: Prehen.Agent.Backends.JidoAI,
       session_adapter: Prehen.Test.FakeSessionAdapter,
       timeout_ms: 600,
-      max_steps: 4,
-      workspace_id: "ws-runtime-resume"
+      max_steps: 4
     ]
 
     {:ok, session_pid} = Runtime.start_session(opts)

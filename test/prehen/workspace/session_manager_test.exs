@@ -9,17 +9,15 @@ defmodule Prehen.Workspace.SessionManagerTest do
       session_adapter: Prehen.Test.FakeSessionAdapter,
       timeout_ms: 800,
       max_steps: 4,
-      root_dir: ".",
       read_max_bytes: 1024,
-      session_status_poll_ms: 20,
-      workspace_id: "ws-manager"
+      session_status_poll_ms: 20
     ]
 
     Keyword.merge(base, extra)
   end
 
   test "session lifecycle transitions through created/running/idle" do
-    {:ok, session} = Prehen.create_session(session_opts(workspace_id: "ws-lifecycle"))
+    {:ok, session} = Prehen.create_session(session_opts([]))
 
     on_exit(fn ->
       if Process.alive?(session.session_pid), do: Prehen.stop_session(session.session_pid)
@@ -42,8 +40,7 @@ defmodule Prehen.Workspace.SessionManagerTest do
   end
 
   test "idle sessions are reclaimed after ttl" do
-    {:ok, session} =
-      Prehen.create_session(session_opts(workspace_id: "ws-reclaim", session_idle_ttl_ms: 150))
+    {:ok, session} = Prehen.create_session(session_opts(session_idle_ttl_ms: 150))
 
     on_exit(fn ->
       if Process.alive?(session.session_pid), do: Prehen.stop_session(session.session_pid)
@@ -57,16 +54,14 @@ defmodule Prehen.Workspace.SessionManagerTest do
     assert {:error, %{type: :session_status_failed, reason: :not_found}} =
              Prehen.session_status(session.session_pid)
 
-    sessions = Prehen.list_sessions(workspace_id: "ws-reclaim")
+    sessions = Prehen.list_sessions()
     refute Enum.any?(sessions, &(&1.pid == session.session_pid))
   end
 
   test "workspace can enable and disable capability packs" do
-    workspace_id = "ws-cap-#{System.unique_integer([:positive])}"
-    assert :ok = Prehen.set_workspace_capability_packs(workspace_id, [])
+    assert :ok = Prehen.set_capability_packs([])
 
-    {:ok, session} =
-      Prehen.create_session(session_opts(workspace_id: workspace_id, capability_allowlist: []))
+    {:ok, session} = Prehen.create_session(session_opts(capability_allowlist: []))
 
     on_exit(fn ->
       if Process.alive?(session.session_pid), do: Prehen.stop_session(session.session_pid)
@@ -77,7 +72,7 @@ defmodule Prehen.Workspace.SessionManagerTest do
   end
 
   test "can resume historical session in the same workspace" do
-    opts = session_opts(workspace_id: "ws-resume")
+    opts = session_opts([])
     {:ok, session} = Prehen.create_session(opts)
     assert {:ok, _} = Prehen.submit_message(session.session_pid, "first resume turn")
     assert {:ok, _} = Prehen.await_result(session.session_pid, timeout: 3_000)
@@ -103,7 +98,7 @@ defmodule Prehen.Workspace.SessionManagerTest do
   end
 
   test "idle reclaim releases process but keeps ledger file for later recovery" do
-    opts = session_opts(workspace_id: "ws-reclaim-ledger", session_idle_ttl_ms: 150)
+    opts = session_opts(session_idle_ttl_ms: 150)
     {:ok, session} = Prehen.create_session(opts)
 
     assert {:ok, _} = Prehen.submit_message(session.session_pid, "persist me")
@@ -127,7 +122,6 @@ defmodule Prehen.Workspace.SessionManagerTest do
     assert {:error, %{type: :session_create_failed, reason: {:capability_not_allowed, :local_fs}}} =
              Prehen.create_session(
                session_opts(
-                 workspace_id: "ws-denied",
                  capability_packs: [:local_fs],
                  capability_allowlist: []
                )
@@ -137,11 +131,33 @@ defmodule Prehen.Workspace.SessionManagerTest do
             %{type: :session_create_failed, reason: {:capability_pack_not_found, :unknown_pack}}} =
              Prehen.create_session(
                session_opts(
-                 workspace_id: "ws-unknown",
                  capability_packs: [:unknown_pack],
                  capability_allowlist: [:unknown_pack]
                )
              )
+  end
+
+  test "explicit workspace override mismatch is rejected without impacting existing sessions" do
+    {:ok, session} = Prehen.create_session(session_opts([]))
+
+    other_workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "prehen_workspace_mismatch_#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(other_workspace)
+
+    on_exit(fn ->
+      if Process.alive?(session.session_pid), do: Prehen.stop_session(session.session_pid)
+      File.rm_rf(other_workspace)
+    end)
+
+    assert {:error, %{type: :session_create_failed, reason: {:workspace_mismatch, _details}}} =
+             Prehen.create_session(session_opts(workspace: other_workspace))
+
+    assert {:ok, _} = Prehen.submit_message(session.session_pid, "still alive")
+    assert {:ok, %{status: :ok}} = Prehen.await_result(session.session_pid, timeout: 3_000)
   end
 
   defp wait_until(fun, timeout_ms \\ 2_000)

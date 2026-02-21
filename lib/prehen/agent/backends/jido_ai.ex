@@ -55,7 +55,7 @@ defmodule Prehen.Agent.Backends.JidoAI do
   @spec tool_context(map()) :: map()
   def tool_context(config) do
     %{
-      root_dir: config[:root_dir],
+      workspace_dir: config[:workspace_dir],
       read_max_bytes: config[:read_max_bytes]
     }
   end

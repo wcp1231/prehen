@@ -3,11 +3,13 @@ defmodule Prehen.CLITest do
   import ExUnit.CaptureIO
 
   test "cli run success path" do
-    root = Path.join(System.tmp_dir!(), "prehen_cli_ok_#{System.unique_integer([:positive])}")
-    File.mkdir_p!(root)
-    File.write!(Path.join(root, "a.txt"), "hello")
+    workspace =
+      Path.join(System.tmp_dir!(), "prehen_cli_ok_#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf(root) end)
+    File.mkdir_p!(workspace)
+    File.write!(Path.join(workspace, "a.txt"), "hello")
+
+    on_exit(fn -> File.rm_rf(workspace) end)
 
     Prehen.Test.MockBackend.set_results([
       {:ok, %{status: :ok, answer: "CLI done", trace: []}}
@@ -24,8 +26,8 @@ defmodule Prehen.CLITest do
                      "run",
                      "say",
                      "hi",
-                     "--root-dir",
-                     root
+                     "--workspace",
+                     workspace
                    ] ++ ["--trace-json"]
                  )
       end)
@@ -35,9 +37,11 @@ defmodule Prehen.CLITest do
   end
 
   test "cli run failure path" do
-    root = Path.join(System.tmp_dir!(), "prehen_cli_fail_#{System.unique_integer([:positive])}")
-    File.mkdir_p!(root)
-    on_exit(fn -> File.rm_rf(root) end)
+    workspace =
+      Path.join(System.tmp_dir!(), "prehen_cli_fail_#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(workspace)
+    on_exit(fn -> File.rm_rf(workspace) end)
 
     Prehen.Test.MockBackend.set_results([
       {:error, %{status: :error, reason: :unknown_provider, trace: []}}
@@ -53,14 +57,23 @@ defmodule Prehen.CLITest do
                  Prehen.CLI.main([
                    "run",
                    "fail",
-                   "--root-dir",
-                   root,
+                   "--workspace",
+                   workspace,
                    "--max-steps",
                    "1"
                  ])
       end)
 
     assert stderr =~ "Execution failed"
+  end
+
+  test "cli rejects removed --root-dir option with explicit message" do
+    stderr =
+      capture_io(:stderr, fn ->
+        assert {:error, :invalid_args} = Prehen.CLI.main(["run", "task", "--root-dir", "."])
+      end)
+
+    assert stderr =~ "Invalid option: --root-dir (removed). Use --workspace PATH instead."
   end
 
   test "trace_json outputs typed envelope schema without legacy fields" do

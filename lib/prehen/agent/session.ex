@@ -21,7 +21,7 @@ defmodule Prehen.Agent.Session do
   alias Prehen.Agent.EventBridge
   alias Prehen.Agent.Policies.{ModelRouter, RetryPolicy}
   alias Prehen.Memory
-  alias Prehen.Workspace.SessionQueue
+  alias Prehen.Workspace.{Paths, SessionQueue}
 
   @type queue_kind :: SessionQueue.queue_kind()
 
@@ -241,6 +241,7 @@ defmodule Prehen.Agent.Session do
     |> Map.put_new(:session_status_poll_ms, 50)
     |> Map.put_new(:timeout_ms, 15_000)
     |> Map.put_new(:max_steps, 8)
+    |> Map.put_new(:workspace_dir, Paths.resolve_workspace_dir())
     |> Map.put_new(:stm_buffer_limit, 24)
     |> Map.put_new(:stm_token_budget, 8_000)
     |> Map.put_new(:ltm_adapter_name, :noop)
@@ -811,7 +812,7 @@ defmodule Prehen.Agent.Session do
 
   defp tool_context(config) do
     %{
-      root_dir: config[:root_dir],
+      workspace_dir: config[:workspace_dir],
       read_max_bytes: config[:read_max_bytes]
     }
   end
@@ -855,28 +856,32 @@ defmodule Prehen.Agent.Session do
 
   defp maybe_restore_from_ledger(state) do
     if resume_requested?(state.config) do
-      case Prehen.Conversation.Store.replay_result(state.session_id) do
-        {:ok, records} ->
-          with {:ok, _projection} <-
-                 Memory.rebuild_session(state.session_id, records, memory_opts(state.config)) do
-            turn_seq = max(state.turn_seq, max_turn_seq(records))
+      if Prehen.Conversation.SessionLedger.session_exists?(state.session_id) do
+        case Prehen.Conversation.Store.replay_result(state.session_id) do
+          {:ok, records} ->
+            with {:ok, _projection} <-
+                   Memory.rebuild_session(state.session_id, records, memory_opts(state.config)) do
+              turn_seq = max(state.turn_seq, max_turn_seq(records))
 
-            recovered_state =
-              state
-              |> Map.put(:turn_seq, turn_seq)
-              |> emit("ai.session.recovered", %{
-                turn_seq: turn_seq,
-                replayed_records: length(records)
-              })
+              recovered_state =
+                state
+                |> Map.put(:turn_seq, turn_seq)
+                |> emit("ai.session.recovered", %{
+                  turn_seq: turn_seq,
+                  replayed_records: length(records)
+                })
 
-            {:ok, recovered_state}
-          else
-            {:error, reason} ->
-              {:error, {:session_recovery_failed, state.session_id, reason}}
-          end
+              {:ok, recovered_state}
+            else
+              {:error, reason} ->
+                {:error, {:session_recovery_failed, state.session_id, reason}}
+            end
 
-        {:error, reason} ->
-          {:error, {:session_recovery_failed, state.session_id, reason}}
+          {:error, reason} ->
+            {:error, {:session_recovery_failed, state.session_id, reason}}
+        end
+      else
+        {:error, {:session_recovery_failed, state.session_id, :ledger_not_found}}
       end
     else
       {:ok, state}

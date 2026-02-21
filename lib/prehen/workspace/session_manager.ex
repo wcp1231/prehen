@@ -20,16 +20,15 @@ defmodule Prehen.Workspace.SessionManager do
 
   alias Prehen.Agent.Session
   alias Prehen.Tools.PackRegistry
-  alias Prehen.Workspace.{SessionLifecycle, SessionSupervisor}
+  alias Prehen.Workspace.{Paths, SessionLifecycle, SessionSupervisor}
 
-  @default_workspace "default"
   @default_sync_interval_ms 100
   @default_idle_ttl_ms 300_000
 
   @type lifecycle :: SessionLifecycle.t()
   @type session_record :: %{
           session_id: String.t(),
-          workspace_id: String.t(),
+          workspace_dir: String.t(),
           pid: pid(),
           inserted_at_ms: integer(),
           status: atom(),
@@ -42,20 +41,28 @@ defmodule Prehen.Workspace.SessionManager do
           capability_allowlist: [atom()]
         }
 
+  @type state :: %{
+          sessions: %{optional(pid()) => session_record()},
+          monitors: %{optional(reference()) => pid()},
+          sync_interval_ms: pos_integer(),
+          bound_workspace_dir: String.t() | nil,
+          capability_packs: [atom()] | nil
+        }
+
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, %{}, Keyword.put_new(opts, :name, __MODULE__))
+    GenServer.start_link(__MODULE__, opts, Keyword.put_new(opts, :name, __MODULE__))
   end
 
   @spec start_session(map(), keyword()) ::
-          {:ok, %{pid: pid(), session_id: String.t(), workspace_id: String.t()}}
+          {:ok, %{pid: pid(), session_id: String.t(), workspace_dir: String.t()}}
           | {:error, term()}
   def start_session(config, opts \\ []) when is_map(config) do
     GenServer.call(__MODULE__, {:start_session, config, opts})
   end
 
   @spec resume_session(String.t(), map(), keyword()) ::
-          {:ok, %{pid: pid(), session_id: String.t(), workspace_id: String.t()}}
+          {:ok, %{pid: pid(), session_id: String.t(), workspace_dir: String.t()}}
           | {:error, term()}
   def resume_session(session_id, config, opts \\ [])
       when is_binary(session_id) and is_map(config) do
@@ -67,9 +74,9 @@ defmodule Prehen.Workspace.SessionManager do
     GenServer.call(__MODULE__, {:stop_session, session_pid})
   end
 
-  @spec list_sessions(String.t() | nil) :: [session_record()]
-  def list_sessions(workspace_id \\ nil) do
-    GenServer.call(__MODULE__, {:list_sessions, workspace_id})
+  @spec list_sessions(keyword()) :: [session_record()]
+  def list_sessions(opts \\ []) when is_list(opts) do
+    GenServer.call(__MODULE__, {:list_sessions, opts})
   end
 
   @spec get_session(pid()) :: {:ok, session_record()} | {:error, :not_found}
@@ -82,10 +89,9 @@ defmodule Prehen.Workspace.SessionManager do
     GenServer.call(__MODULE__, {:get_session_by_id, session_id})
   end
 
-  @spec set_workspace_capability_packs(String.t(), [atom()]) :: :ok | {:error, term()}
-  def set_workspace_capability_packs(workspace_id, packs)
-      when is_binary(workspace_id) and is_list(packs) do
-    GenServer.call(__MODULE__, {:set_workspace_capability_packs, workspace_id, packs})
+  @spec set_capability_packs([atom()], keyword()) :: :ok | {:error, term()}
+  def set_capability_packs(packs, opts \\ []) when is_list(packs) and is_list(opts) do
+    GenServer.call(__MODULE__, {:set_capability_packs, packs, opts})
   end
 
   @spec health() :: map()
@@ -98,7 +104,7 @@ defmodule Prehen.Workspace.SessionManager do
   end
 
   @impl true
-  def init(_arg) do
+  def init(opts) when is_list(opts) do
     sync_interval_ms =
       Application.get_env(:prehen, :session_sync_interval_ms, @default_sync_interval_ms)
 
@@ -106,46 +112,69 @@ defmodule Prehen.Workspace.SessionManager do
       sessions: %{},
       monitors: %{},
       sync_interval_ms: sync_interval_ms,
-      workspace_capability_packs: %{}
+      bound_workspace_dir: nil,
+      capability_packs: nil
     }
+
+    state =
+      case workspace_override(opts) do
+        nil ->
+          state
+
+        workspace_dir ->
+          case bind_workspace(state, workspace_dir) do
+            {:ok, next_state} -> next_state
+            {:error, reason} -> raise "failed to bind workspace: #{inspect(reason)}"
+          end
+      end
 
     {:ok, schedule_sync(state)}
   end
 
   @impl true
   def handle_call({:start_session, config, opts}, _from, state) do
-    workspace_id = opts |> Keyword.get(:workspace_id, @default_workspace) |> to_string()
-
-    case start_managed_session(state, config, workspace_id, opts) do
-      {:ok, reply, next_state} -> {:reply, {:ok, reply}, next_state}
+    with {:ok, workspace_dir, state_after_bind} <- resolve_bound_workspace(state, config, opts),
+         {:ok, reply, next_state} <-
+           start_managed_session(
+             state_after_bind,
+             Map.put(config, :workspace_dir, workspace_dir),
+             workspace_dir,
+             opts
+           ) do
+      {:reply, {:ok, reply}, next_state}
+    else
       {:error, reason, next_state} -> {:reply, {:error, reason}, next_state}
     end
   end
 
   def handle_call({:resume_session, session_id, config, opts}, _from, state) do
-    workspace_id = opts |> Keyword.get(:workspace_id, @default_workspace) |> to_string()
+    with {:ok, workspace_dir, state_after_bind} <- resolve_bound_workspace(state, config, opts) do
+      case find_session_record_by_id(state_after_bind.sessions, session_id) do
+        {:ok, record} ->
+          reply = %{
+            pid: record.pid,
+            session_id: record.session_id,
+            workspace_dir: record.workspace_dir,
+            capability_packs: record.capability_packs
+          }
 
-    case find_session_record_by_id(state.sessions, session_id) do
-      {:ok, record} ->
-        reply = %{
-          pid: record.pid,
-          session_id: record.session_id,
-          workspace_id: record.workspace_id,
-          capability_packs: record.capability_packs
-        }
+          {:reply, {:ok, reply}, state_after_bind}
 
-        {:reply, {:ok, reply}, state}
+        :error ->
+          session_config =
+            config
+            |> Map.put(:session_id, session_id)
+            |> Map.put(:resume, true)
+            |> Map.put(:workspace_dir, workspace_dir)
 
-      :error ->
-        session_config =
-          config
-          |> Map.put(:session_id, session_id)
-          |> Map.put(:resume, true)
-
-        case start_managed_session(state, session_config, workspace_id, opts) do
-          {:ok, reply, next_state} -> {:reply, {:ok, reply}, next_state}
-          {:error, reason, next_state} -> {:reply, {:error, reason}, next_state}
-        end
+          case start_managed_session(state_after_bind, session_config, workspace_dir, opts) do
+            {:ok, reply, next_state} -> {:reply, {:ok, reply}, next_state}
+            {:error, reason, next_state} -> {:reply, {:error, reason}, next_state}
+          end
+      end
+    else
+      {:error, reason, next_state} ->
+        {:reply, {:error, reason}, next_state}
     end
   end
 
@@ -161,13 +190,10 @@ defmodule Prehen.Workspace.SessionManager do
     end
   end
 
-  def handle_call({:list_sessions, workspace_id}, _from, state) do
+  def handle_call({:list_sessions, _opts}, _from, state) do
     sessions =
       state.sessions
       |> Map.values()
-      |> Enum.filter(fn record ->
-        is_nil(workspace_id) or record.workspace_id == workspace_id
-      end)
       |> Enum.sort_by(& &1.inserted_at_ms)
 
     {:reply, sessions, state}
@@ -187,17 +213,14 @@ defmodule Prehen.Workspace.SessionManager do
     end
   end
 
-  def handle_call({:set_workspace_capability_packs, workspace_id, packs}, _from, state) do
-    normalized = normalize_pack_list(packs)
-
-    with {:ok, _tools} <- PackRegistry.resolve_tools(normalized) do
-      next =
-        put_in(state, [:workspace_capability_packs, workspace_id], normalized)
-
-      {:reply, :ok, next}
+  def handle_call({:set_capability_packs, packs, opts}, _from, state) do
+    with {:ok, _workspace_dir, state_after_bind} <- resolve_bound_workspace(state, %{}, opts),
+         normalized <- normalize_pack_list(packs),
+         {:ok, _tools} <- PackRegistry.resolve_tools(normalized) do
+      {:reply, :ok, %{state_after_bind | capability_packs: normalized}}
     else
-      {:error, _reason} = error ->
-        {:reply, error, state}
+      {:error, reason, next_state} -> {:reply, {:error, reason}, next_state}
+      {:error, _reason} = error -> {:reply, error, state}
     end
   end
 
@@ -320,12 +343,12 @@ defmodule Prehen.Workspace.SessionManager do
     end
   end
 
-  defp start_managed_session(state, config, workspace_id, opts) do
+  defp start_managed_session(state, config, workspace_dir, opts) do
     start_opts = Keyword.take(opts, [:name])
     now = System.system_time(:millisecond)
 
     with {:ok, session_config, capability_packs, capability_allowlist} <-
-           resolve_session_capabilities(state, config, workspace_id, opts),
+           resolve_session_capabilities(state, config, opts),
          {:ok, session_pid} <- SessionSupervisor.start_session(session_config, start_opts),
          snapshot <- Session.snapshot(session_pid),
          true <- is_binary(snapshot.session_id) do
@@ -335,7 +358,7 @@ defmodule Prehen.Workspace.SessionManager do
 
       record = %{
         session_id: snapshot.session_id,
-        workspace_id: workspace_id,
+        workspace_dir: workspace_dir,
         pid: session_pid,
         inserted_at_ms: now,
         status: snapshot.status,
@@ -357,7 +380,7 @@ defmodule Prehen.Workspace.SessionManager do
       reply = %{
         pid: session_pid,
         session_id: record.session_id,
-        workspace_id: workspace_id,
+        workspace_dir: workspace_dir,
         capability_packs: capability_packs
       }
 
@@ -366,6 +389,70 @@ defmodule Prehen.Workspace.SessionManager do
       {:error, reason} -> {:error, reason, state}
       _ -> {:error, :invalid_session_snapshot, state}
     end
+  end
+
+  defp resolve_bound_workspace(state, config, opts) do
+    explicit_workspace = workspace_override(opts)
+
+    requested_workspace =
+      explicit_workspace || workspace_from_config(config) || Paths.resolve_workspace_dir()
+
+    requested_workspace = Path.expand(requested_workspace)
+
+    case state.bound_workspace_dir do
+      nil ->
+        case bind_workspace(state, requested_workspace) do
+          {:ok, next_state} -> {:ok, requested_workspace, next_state}
+          {:error, reason} -> {:error, reason, state}
+        end
+
+      bound_workspace ->
+        if is_binary(explicit_workspace) and requested_workspace != bound_workspace do
+          {:error, workspace_mismatch(bound_workspace, requested_workspace), state}
+        else
+          {:ok, bound_workspace, state}
+        end
+    end
+  end
+
+  defp bind_workspace(state, workspace_dir) when is_binary(workspace_dir) do
+    expanded = Path.expand(workspace_dir)
+
+    with :ok <- Paths.ensure_workspace_layout(expanded) do
+      Application.put_env(:prehen, :workspace_dir, expanded)
+      {:ok, %{state | bound_workspace_dir: expanded}}
+    else
+      {:error, reason} -> {:error, {:workspace_bind_failed, expanded, reason}}
+    end
+  end
+
+  defp workspace_override(opts) when is_list(opts) do
+    with nil <- normalized_workspace(Keyword.get(opts, :workspace_dir)) do
+      normalized_workspace(Keyword.get(opts, :workspace))
+    end
+  end
+
+  defp workspace_from_config(config) when is_map(config) do
+    config
+    |> Map.get(:workspace_dir, Map.get(config, "workspace_dir"))
+    |> normalized_workspace()
+  end
+
+  defp normalized_workspace(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> Path.expand(trimmed)
+    end
+  end
+
+  defp normalized_workspace(_value), do: nil
+
+  defp workspace_mismatch(expected_workspace, provided_workspace) do
+    {:workspace_mismatch,
+     %{
+       expected_workspace: expected_workspace,
+       provided_workspace: provided_workspace
+     }}
   end
 
   defp find_session_record_by_id(sessions, session_id) do
@@ -378,15 +465,11 @@ defmodule Prehen.Workspace.SessionManager do
     end
   end
 
-  defp resolve_session_capabilities(state, config, workspace_id, opts) do
+  defp resolve_session_capabilities(state, config, opts) do
     requested_packs =
       opts
       |> Keyword.get_lazy(:capability_packs, fn ->
-        Map.get(
-          state.workspace_capability_packs,
-          workspace_id,
-          Map.get(config, :capability_packs, [])
-        )
+        state.capability_packs || Map.get(config, :capability_packs, [])
       end)
       |> normalize_pack_list()
 

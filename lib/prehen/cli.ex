@@ -3,31 +3,62 @@ defmodule Prehen.CLI do
 
   @usage """
   Usage:
-    prehen run "<task>" [--session-id ID] [--max-steps N] [--timeout-ms N] [--root-dir PATH] [--model NAME] [--trace-json]
+    prehen run "<task>" [--workspace PATH] [--session-id ID] [--max-steps N] [--timeout-ms N] [--model NAME] [--trace-json]
   """
 
   @spec main([String.t()]) :: {:ok, map()} | {:error, term()}
   def main(argv) do
-    {opts, args, _invalid} =
+    {opts, args, invalid} =
       OptionParser.parse(argv,
         strict: [
+          workspace: :string,
           session_id: :string,
           max_steps: :integer,
           timeout_ms: :integer,
-          root_dir: :string,
           model: :string,
           trace_json: :boolean
         ]
       )
 
-    case args do
-      ["run" | task_parts] when task_parts != [] ->
-        task = Enum.join(task_parts, " ")
-        run_task(task, opts)
-
-      _ ->
-        IO.puts(:stderr, String.trim(@usage))
+    cond do
+      invalid != [] ->
+        print_invalid_switches(invalid)
         {:error, :invalid_args}
+
+      true ->
+        case args do
+          ["run" | task_parts] when task_parts != [] ->
+            task = Enum.join(task_parts, " ")
+            run_task(task, opts)
+
+          _ ->
+            IO.puts(:stderr, String.trim(@usage))
+            {:error, :invalid_args}
+        end
+    end
+  end
+
+  defp print_invalid_switches(invalid) when is_list(invalid) do
+    Enum.each(invalid, fn
+      {switch, _value} ->
+        normalized =
+          switch
+          |> to_string()
+          |> String.trim_leading("-")
+          |> String.replace("_", "-")
+
+        if normalized == "root-dir" do
+          IO.puts(:stderr, "Invalid option: --root-dir (removed). Use --workspace PATH instead.")
+        else
+          IO.puts(:stderr, "Invalid option: --#{normalized}")
+        end
+
+      other ->
+        IO.puts(:stderr, "Invalid option: #{inspect(other)}")
+    end)
+
+    if Enum.any?(invalid) do
+      IO.puts(:stderr, String.trim(@usage))
     end
   end
 

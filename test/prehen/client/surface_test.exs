@@ -10,17 +10,15 @@ defmodule Prehen.Client.SurfaceTest do
       session_adapter: Prehen.Test.FakeSessionAdapter,
       timeout_ms: 800,
       max_steps: 4,
-      root_dir: ".",
       read_max_bytes: 1024,
-      session_status_poll_ms: 20,
-      workspace_id: "ws-client"
+      session_status_poll_ms: 20
     ]
 
     Keyword.merge(base, extra)
   end
 
   test "unified session api supports create/submit/status/stop" do
-    assert {:ok, session} = Surface.create_session(client_opts(workspace_id: "ws-surface"))
+    assert {:ok, session} = Surface.create_session(client_opts([]))
 
     on_exit(fn ->
       if Process.alive?(session.session_pid), do: Surface.stop_session(session.session_pid)
@@ -32,7 +30,7 @@ defmodule Prehen.Client.SurfaceTest do
     assert is_binary(submit.request_id)
 
     assert {:ok, status} = Surface.session_status(session.session_pid)
-    assert status.workspace_id == "ws-surface"
+    assert is_binary(status.workspace_dir)
 
     assert {:ok, result} = Surface.await_result(session.session_pid, timeout: 3_000)
     assert result.status == :ok
@@ -42,7 +40,7 @@ defmodule Prehen.Client.SurfaceTest do
   end
 
   test "event subscription contract delivers typed envelope events" do
-    assert {:ok, session} = Surface.create_session(client_opts(workspace_id: "ws-stream"))
+    assert {:ok, session} = Surface.create_session(client_opts([]))
 
     on_exit(fn ->
       if Process.alive?(session.session_pid), do: Surface.stop_session(session.session_pid)
@@ -60,7 +58,7 @@ defmodule Prehen.Client.SurfaceTest do
   end
 
   test "await timeout returns unified error shape" do
-    assert {:ok, session} = Surface.create_session(client_opts(workspace_id: "ws-timeout"))
+    assert {:ok, session} = Surface.create_session(client_opts([]))
 
     on_exit(fn ->
       if Process.alive?(session.session_pid), do: Surface.stop_session(session.session_pid)
@@ -73,7 +71,7 @@ defmodule Prehen.Client.SurfaceTest do
   end
 
   test "resume_session keeps session_id stable and preserves correlation fields" do
-    opts = client_opts(workspace_id: "ws-resume-surface")
+    opts = client_opts([])
     {:ok, created} = Surface.create_session(opts)
 
     assert {:ok, _} = Surface.submit_message(created.session_pid, "first surface turn")
@@ -107,7 +105,7 @@ defmodule Prehen.Client.SurfaceTest do
     File.write!(ledger_file, "{\"broken_json\"")
 
     assert {:error, error} =
-             Surface.resume_session(session_id, client_opts(workspace_id: "ws-corrupt-surface"))
+             Surface.resume_session(session_id, client_opts([]))
 
     assert error.status == :error
     assert error.type == :session_resume_failed
@@ -116,5 +114,29 @@ defmodule Prehen.Client.SurfaceTest do
              {:session_recovery_failed, ^session_id, {:ledger_corrupt, %{line: 1}}},
              error.reason
            )
+  end
+
+  test "create_session returns unified error on explicit workspace mismatch" do
+    {:ok, session} = Surface.create_session(client_opts([]))
+
+    other_workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "prehen_surface_workspace_#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(other_workspace)
+
+    on_exit(fn ->
+      if Process.alive?(session.session_pid), do: Surface.stop_session(session.session_pid)
+      File.rm_rf(other_workspace)
+    end)
+
+    assert {:error, error} =
+             Surface.create_session(client_opts(workspace: other_workspace))
+
+    assert error.status == :error
+    assert error.type == :session_create_failed
+    assert match?({:workspace_mismatch, _}, error.reason)
   end
 end

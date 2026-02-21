@@ -11,7 +11,6 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
       session_adapter: Prehen.Test.FakeSessionAdapter,
       timeout_ms: 800,
       max_steps: 4,
-      root_dir: ".",
       read_max_bytes: 1024,
       session_status_poll_ms: 20
     ]
@@ -20,7 +19,7 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
   end
 
   test "integration: session + orchestration + memory + event-store" do
-    {:ok, session} = Surface.create_session(opts(workspace_id: "ws-integration"))
+    {:ok, session} = Surface.create_session(opts([]))
 
     on_exit(fn ->
       if Process.alive?(session.session_pid), do: Surface.stop_session(session.session_pid)
@@ -64,7 +63,7 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
       for idx <- 1..8 do
         Task.async(fn ->
           {:ok, session} =
-            Surface.create_session(opts(workspace_id: "ws-load", session_idle_ttl_ms: 5_000))
+            Surface.create_session(opts(session_idle_ttl_ms: 5_000))
 
           try do
             assert {:ok, _} = Surface.submit_message(session.session_pid, "load #{idx}")
@@ -84,7 +83,7 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
   end
 
   test "restart recovery: replay historical ledger and continue dialogue" do
-    {:ok, session} = Surface.create_session(opts(workspace_id: "ws-restart-recovery"))
+    {:ok, session} = Surface.create_session(opts([]))
     assert {:ok, _} = Surface.submit_message(session.session_pid, "restart first")
     assert {:ok, _} = Surface.await_result(session.session_pid, timeout: 3_000)
     assert :ok = Surface.stop_session(session.session_pid)
@@ -102,8 +101,7 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
                new_stm_pid != old_stm_pid
            end)
 
-    {:ok, resumed} =
-      Surface.resume_session(session.session_id, opts(workspace_id: "ws-restart-recovery"))
+    {:ok, resumed} = Surface.resume_session(session.session_id, opts([]))
 
     on_exit(fn ->
       if Process.alive?(resumed.session_pid), do: Surface.stop_session(resumed.session_pid)
@@ -130,7 +128,7 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
   test "concurrent sessions are isolated by independent session ledgers" do
     session_ids =
       for idx <- 1..4 do
-        {:ok, session} = Surface.create_session(opts(workspace_id: "ws-ledger-isolation"))
+        {:ok, session} = Surface.create_session(opts([]))
 
         try do
           assert {:ok, _} = Surface.submit_message(session.session_pid, "isolation #{idx}")

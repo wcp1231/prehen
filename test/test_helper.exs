@@ -231,14 +231,22 @@ defmodule Prehen.Test.FakeSessionAdapter do
   end
 end
 
-ledger_dir =
-  Path.join(System.tmp_dir!(), "prehen_test_ledgers_#{System.unique_integer([:positive])}")
+workspace_dir =
+  Path.join(System.tmp_dir!(), "prehen_test_workspace_#{System.unique_integer([:positive])}")
 
-File.mkdir_p!(ledger_dir)
-Application.put_env(:prehen, :session_ledger_dir, ledger_dir)
+global_dir =
+  Path.join(System.tmp_dir!(), "prehen_test_global_#{System.unique_integer([:positive])}")
+
+File.mkdir_p!(workspace_dir)
+File.mkdir_p!(global_dir)
+Application.put_env(:prehen, :workspace_dir, workspace_dir)
+Application.put_env(:prehen, :global_dir, global_dir)
 
 ExUnit.after_suite(fn _ ->
-  File.rm_rf(ledger_dir)
+  Application.delete_env(:prehen, :workspace_dir)
+  Application.delete_env(:prehen, :global_dir)
+  File.rm_rf(workspace_dir)
+  File.rm_rf(global_dir)
 end)
 
 ExUnit.start()

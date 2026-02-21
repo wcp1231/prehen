@@ -6,22 +6,22 @@ defmodule Prehen.Actions.PathGuard do
   def resolve("", _config), do: {:error, error("validation_error", "empty path")}
 
   def resolve(path, config) when is_binary(path) do
-    root_dir = config[:root_dir] |> Path.expand()
-    expanded = expand_path(path, root_dir)
+    workspace_dir = resolve_workspace_dir(config)
+    expanded = expand_path(path, workspace_dir)
 
-    if inside_root?(expanded, root_dir) do
+    if inside_root?(expanded, workspace_dir) do
       {:ok, expanded}
     else
-      {:error, error("permission_error", "path is outside allowed root", %{path: path})}
+      {:error, error("permission_error", "path is outside workspace", %{path: path})}
     end
   end
 
   def resolve(_path, _config), do: {:error, error("validation_error", "path must be a string")}
 
-  defp expand_path(path, root_dir) do
+  defp expand_path(path, base_dir) do
     case Path.type(path) do
       :absolute -> Path.expand(path)
-      _ -> Path.expand(path, root_dir)
+      _ -> Path.expand(path, base_dir)
     end
   end
 
@@ -31,6 +31,10 @@ defmodule Prehen.Actions.PathGuard do
 
     normalized_path == normalized_root ||
       String.starts_with?(normalized_path, normalized_root <> "/")
+  end
+
+  defp resolve_workspace_dir(config) when is_map(config) do
+    config[:workspace_dir] || config["workspace_dir"] || "."
   end
 
   defp error(type, message, details \\ %{}) do

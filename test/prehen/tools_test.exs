@@ -4,17 +4,19 @@ defmodule Prehen.ActionsTest do
   alias Prehen.Actions.{LS, Read}
 
   setup do
-    root = Path.join(System.tmp_dir!(), "prehen_tools_#{System.unique_integer([:positive])}")
-    File.mkdir_p!(root)
-    on_exit(fn -> File.rm_rf(root) end)
+    workspace =
+      Path.join(System.tmp_dir!(), "prehen_tools_#{System.unique_integer([:positive])}")
 
-    config = %{root_dir: root, read_max_bytes: 20}
-    {:ok, root: root, config: config}
+    File.mkdir_p!(workspace)
+    on_exit(fn -> File.rm_rf(workspace) end)
+
+    config = %{workspace_dir: workspace, read_max_bytes: 20}
+    {:ok, workspace: workspace, config: config}
   end
 
-  test "ls returns directory entries", %{root: root, config: config} do
-    File.mkdir_p!(Path.join(root, "lib"))
-    File.write!(Path.join(root, "lib/demo.txt"), "demo")
+  test "ls returns directory entries", %{workspace: workspace, config: config} do
+    File.mkdir_p!(Path.join(workspace, "lib"))
+    File.write!(Path.join(workspace, "lib/demo.txt"), "demo")
 
     result = LS.invoke(%{"path" => "lib"}, config)
 
@@ -29,8 +31,11 @@ defmodule Prehen.ActionsTest do
     assert result["error"]["type"] == "permission_error"
   end
 
-  test "read returns selected lines and truncates by max_bytes", %{root: root, config: config} do
-    file = Path.join(root, "notes.txt")
+  test "read returns selected lines and truncates by max_bytes", %{
+    workspace: workspace,
+    config: config
+  } do
+    file = Path.join(workspace, "notes.txt")
     File.write!(file, "line1\nline2\nline3\nline4")
 
     result =
@@ -52,20 +57,37 @@ defmodule Prehen.ActionsTest do
     assert result["error"]["type"] == "validation_error"
   end
 
-  test "local fs tools are read-only and side-effect free", %{root: root, config: config} do
-    file = Path.join(root, "readonly.txt")
+  test "local fs tools are read-only and side-effect free", %{
+    workspace: workspace,
+    config: config
+  } do
+    file = Path.join(workspace, "readonly.txt")
     File.write!(file, "alpha\nbeta")
 
-    before_entries = File.ls!(root) |> Enum.sort()
+    before_entries = File.ls!(workspace) |> Enum.sort()
     before_content = File.read!(file)
 
     _ = LS.invoke(%{"path" => "."}, config)
     _ = Read.invoke(%{"path" => "readonly.txt"}, config)
 
-    after_entries = File.ls!(root) |> Enum.sort()
+    after_entries = File.ls!(workspace) |> Enum.sort()
     after_content = File.read!(file)
 
     assert after_entries == before_entries
     assert after_content == before_content
+  end
+
+  test "tools can access .prehen metadata directory", %{workspace: workspace, config: config} do
+    meta_dir = Path.join(workspace, ".prehen")
+    File.mkdir_p!(meta_dir)
+    File.write!(Path.join(meta_dir, "agent.txt"), "meta")
+
+    ls_result = LS.invoke(%{"path" => ".prehen"}, config)
+    read_result = Read.invoke(%{"path" => ".prehen/agent.txt"}, config)
+
+    assert ls_result["ok"] == true
+    assert Enum.any?(ls_result["data"]["entries"], &(&1["name"] == "agent.txt"))
+    assert read_result["ok"] == true
+    assert read_result["data"]["content"] == "meta"
   end
 end

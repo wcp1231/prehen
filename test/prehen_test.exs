@@ -7,7 +7,6 @@ defmodule PrehenTest do
       session_adapter: Prehen.Test.FakeSessionAdapter,
       timeout_ms: 800,
       max_steps: 4,
-      root_dir: ".",
       read_max_bytes: 1024,
       session_status_poll_ms: 20
     ]
@@ -62,22 +61,20 @@ defmodule PrehenTest do
   end
 
   test "workspace supports concurrent sessions and status query api" do
-    opts = Keyword.put(session_opts(), :workspace_id, "ws-a")
-
-    {:ok, s1} = Prehen.create_session(opts)
-    {:ok, s2} = Prehen.create_session(opts)
+    {:ok, s1} = Prehen.create_session(session_opts())
+    {:ok, s2} = Prehen.create_session(session_opts())
 
     on_exit(fn ->
       if Process.alive?(s1.session_pid), do: Prehen.stop_session(s1.session_pid)
       if Process.alive?(s2.session_pid), do: Prehen.stop_session(s2.session_pid)
     end)
 
-    sessions = Prehen.list_sessions(workspace_id: "ws-a")
+    sessions = Prehen.list_sessions()
     assert length(sessions) >= 2
     assert Enum.any?(sessions, &(&1.pid == s1.session_pid))
     assert Enum.any?(sessions, &(&1.pid == s2.session_pid))
 
-    assert {:ok, %{workspace_id: "ws-a", pid: pid, snapshot: %{session_id: session_id}}} =
+    assert {:ok, %{pid: pid, snapshot: %{session_id: session_id}}} =
              Prehen.session_status(s1.session_pid)
 
     assert pid == s1.session_pid
@@ -103,14 +100,13 @@ defmodule PrehenTest do
   end
 
   test "public api exposes resume_session and keeps session continuity" do
-    opts = Keyword.put(session_opts(), :workspace_id, "ws-public-resume")
-    {:ok, created} = Prehen.create_session(opts)
+    {:ok, created} = Prehen.create_session(session_opts())
 
     assert {:ok, _} = Prehen.submit_message(created.session_pid, "public first")
     assert {:ok, _} = Prehen.await_result(created.session_pid, timeout: 3_000)
     assert :ok = Prehen.stop_session(created.session_pid)
 
-    {:ok, resumed} = Prehen.resume_session(created.session_id, opts)
+    {:ok, resumed} = Prehen.resume_session(created.session_id, session_opts())
 
     on_exit(fn ->
       if Process.alive?(resumed.session_pid), do: Prehen.stop_session(resumed.session_pid)

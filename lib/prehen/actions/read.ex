@@ -86,7 +86,8 @@ defmodule Prehen.Actions.Read do
     tool_context = context[:tool_context] || %{}
 
     %{
-      root_dir: Map.get(tool_context, :root_dir) || Map.get(tool_context, "root_dir") || ".",
+      workspace_dir:
+        Map.get(tool_context, :workspace_dir) || Map.get(tool_context, "workspace_dir") || ".",
       read_max_bytes:
         Map.get(tool_context, :read_max_bytes) || Map.get(tool_context, "read_max_bytes") || 8_192
     }

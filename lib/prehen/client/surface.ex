@@ -29,8 +29,7 @@ defmodule Prehen.Client.Surface do
       {:ok,
        %{
          session_pid: session_pid,
-         session_id: status.session_id,
-         workspace_id: status.workspace_id
+         session_id: status.session_id
        }}
     else
       {:error, reason} ->
@@ -49,8 +48,7 @@ defmodule Prehen.Client.Surface do
       {:ok,
        %{
          session_pid: session_pid,
-         session_id: status.session_id,
-         workspace_id: status.workspace_id
+         session_id: status.session_id
        }}
     else
       {:error, reason} ->
@@ -145,8 +143,8 @@ defmodule Prehen.Client.Surface do
   end
 
   @doc """
-  列出会话（可按 workspace 过滤）。
-  List sessions, optionally filtered by workspace.
+  列出当前进程绑定 workspace 下的会话。
+  List sessions in the currently bound workspace.
   """
   @spec list_sessions(keyword()) :: [map()]
   def list_sessions(opts \\ []) when is_list(opts) do
@@ -164,13 +162,12 @@ defmodule Prehen.Client.Surface do
   end
 
   @doc """
-  设置 workspace 的 capability packs（control plane）。
-  Set workspace capability packs (control plane operation).
+  设置当前进程绑定 workspace 的 capability packs（control plane）。
+  Set capability packs for the currently bound workspace.
   """
-  @spec set_workspace_capability_packs(String.t(), [atom()]) :: :ok | {:error, term()}
-  def set_workspace_capability_packs(workspace_id, packs)
-      when is_binary(workspace_id) and is_list(packs) do
-    Runtime.set_workspace_capability_packs(workspace_id, packs)
+  @spec set_capability_packs([atom()], keyword()) :: :ok | {:error, term()}
+  def set_capability_packs(packs, opts \\ []) when is_list(packs) and is_list(opts) do
+    Runtime.set_capability_packs(packs, opts)
   end
 
   @doc """
@@ -201,7 +198,6 @@ defmodule Prehen.Client.Surface do
               {:ok,
                result
                |> Map.put_new(:session_id, session.session_id)
-               |> Map.put_new(:workspace_id, session.workspace_id)
                |> Map.put_new(:request_id, submit.request_id)}
             else
               {:error, _reason} = error ->

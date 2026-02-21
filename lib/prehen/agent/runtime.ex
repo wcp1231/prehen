@@ -34,11 +34,16 @@ defmodule Prehen.Agent.Runtime do
   @spec start_session(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_session(opts \\ []) do
     config = Config.load(opts)
-    workspace_id = opts |> Keyword.get(:workspace_id, "default") |> to_string()
 
     manager_opts =
-      [workspace_id: workspace_id] ++
-        Keyword.take(opts, [:name, :capability_packs, :capability_allowlist])
+      opts
+      |> Keyword.take([
+        :name,
+        :capability_packs,
+        :capability_allowlist,
+        :workspace,
+        :workspace_dir
+      ])
 
     case SessionManager.start_session(config, manager_opts) do
       {:ok, %{pid: session_pid}} -> {:ok, session_pid}
@@ -49,11 +54,16 @@ defmodule Prehen.Agent.Runtime do
   @spec resume_session(String.t(), keyword()) :: {:ok, pid()} | {:error, term()}
   def resume_session(session_id, opts \\ []) when is_binary(session_id) do
     config = Config.load(opts)
-    workspace_id = opts |> Keyword.get(:workspace_id, "default") |> to_string()
 
     manager_opts =
-      [workspace_id: workspace_id] ++
-        Keyword.take(opts, [:name, :capability_packs, :capability_allowlist])
+      opts
+      |> Keyword.take([
+        :name,
+        :capability_packs,
+        :capability_allowlist,
+        :workspace,
+        :workspace_dir
+      ])
 
     case SessionManager.resume_session(session_id, config, manager_opts) do
       {:ok, %{pid: session_pid}} -> {:ok, session_pid}
@@ -98,12 +108,7 @@ defmodule Prehen.Agent.Runtime do
 
   @spec list_sessions(keyword()) :: [map()]
   def list_sessions(opts \\ []) do
-    workspace_id =
-      opts
-      |> Keyword.get(:workspace_id)
-      |> normalize_workspace_id()
-
-    SessionManager.list_sessions(workspace_id)
+    SessionManager.list_sessions(opts)
   end
 
   @spec session_status(pid()) :: {:ok, map()} | {:error, term()}
@@ -118,16 +123,15 @@ defmodule Prehen.Agent.Runtime do
     Store.replay(session_id, opts)
   end
 
-  @spec set_workspace_capability_packs(String.t(), [atom()]) :: :ok | {:error, term()}
-  def set_workspace_capability_packs(workspace_id, packs)
-      when is_binary(workspace_id) and is_list(packs) do
-    SessionManager.set_workspace_capability_packs(workspace_id, packs)
+  @spec set_capability_packs([atom()], keyword()) :: :ok | {:error, term()}
+  def set_capability_packs(packs, opts \\ []) when is_list(packs) and is_list(opts) do
+    SessionManager.set_capability_packs(packs, opts)
   end
 
   defp run_via_session(task, config) do
     timeout = config[:timeout_ms] * max(config[:max_steps], 1) * 2
 
-    with {:ok, %{pid: session}} <- SessionManager.start_session(config, workspace_id: "runtime") do
+    with {:ok, %{pid: session}} <- SessionManager.start_session(config, []) do
       try do
         with {:ok, _} <- Session.prompt(session, task),
              {:ok, result} <- Session.await_idle(session, timeout: timeout) do
@@ -138,7 +142,4 @@ defmodule Prehen.Agent.Runtime do
       end
     end
   end
-
-  defp normalize_workspace_id(nil), do: nil
-  defp normalize_workspace_id(value), do: to_string(value)
 end

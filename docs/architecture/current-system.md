@@ -1,6 +1,6 @@
 # Prehen Current Architecture (As-Is)
 
-_Last updated: 2026-02-20_
+_Last updated: 2026-02-21_
 
 本文件描述当前代码实现的系统结构（as-is），用于：
 - 帮助理解当前复杂度来源；
@@ -41,7 +41,7 @@ Prehen.Agent.Runtime
     |
     +--> Prehen.Conversation.Store (ledger-first event/message stream facade)
     |        |
-    |        +--> Session ledger files (`./.prehen/sessions/<session_id>.jsonl`)
+    |        +--> Session ledger files (`$WORKSPACE_DIR/.prehen/sessions/<session_id>.jsonl`)
     +--> Prehen.Memory (STM + LTM adapter contract)
 ```
 
@@ -62,9 +62,9 @@ Prehen.Agent.Runtime
 - 在 Jido backend 下统一走 session 路径。
 
 ### 2.4 `Prehen.Workspace.SessionManager`（control plane）
-- 管理会话元数据：创建、索引、停止、workspace 归属。
+- 管理会话元数据：创建、索引、停止、single-workspace 绑定。
 - 不持有执行细节（执行态在 `Session` 进程内）。
-- 管理 workspace capability packs，并做 idle sync/reclaim。
+- 管理当前绑定 workspace 的 capability packs，并做 idle sync/reclaim。
 
 ### 2.5 `Prehen.Agent.Session`（data plane）
 - 每个会话一个进程，维护回合队列与 active turn。
@@ -109,9 +109,9 @@ sequenceDiagram
     M->>SS: start_session(config)
     SS->>Se: start_link(config)
     Se-->>M: snapshot(session_id, status)
-    M-->>R: {:ok, %{pid, session_id, workspace_id}}
+    M-->>R: {:ok, %{pid, session_id}}
     R-->>S: {:ok, pid}
-    S-->>C: {:ok, %{session_pid, session_id, workspace_id}}
+    S-->>C: {:ok, %{session_pid, session_id}}
 
     C->>P: submit_message(session_pid, text, kind)
     P->>S: submit_message(...)
@@ -206,12 +206,12 @@ sequenceDiagram
 
 ## 5. 当前边界与约束
 
-- 架构定位：平台化方向，支持 multi-session workspace 与可扩展 memory contract。
+- 架构定位：平台化方向，支持单进程单 workspace 下的 multi-session 与可扩展 memory contract。
 - LTM：当前阶段仅接口契约与 adapter 注册/选择，不提供默认持久化实现。
 - 安全：MVP 阶段客户端直连，不包含认证/鉴权。
 - 兼容策略：采用一次性切换，不维护长期双轨兼容。
 - `trace_json`：当前以 `schema_version: 2` 为统一结构。
-- ledger 默认目录：`./.prehen/sessions`。
+- ledger 默认目录：`$HOME/.prehen/workspace/.prehen/sessions`。
 - ledger 权限策略：目录 `0700`、文件 `0600`。
 - 损坏 ledger 在恢复路径为硬失败（返回结构化恢复错误）。
 
@@ -246,7 +246,7 @@ sequenceDiagram
 | Public API | `Prehen` | `lib/prehen.ex` | `run/2`, `create_session/1`, `submit_message/3` | 平台统一入口，转发到 `Surface` |
 | Client Surface | `Prehen.Client.Surface` | `lib/prehen/client/surface.ex` | `create_session/1`, `resume_session/2`, `await_result/2`, `subscribe_events/1` | 给 CLI/Web/Native 提供统一 contract |
 | Runtime Facade | `Prehen.Agent.Runtime` | `lib/prehen/agent/runtime.ex` | `start_session/1`, `resume_session/2`, `session_status/1`, `replay_session/2` | 隐藏会话内部编排细节 |
-| Control Plane | `Prehen.Workspace.SessionManager` | `lib/prehen/workspace/session_manager.ex` | `start_session/2`, `list_sessions/1`, `set_workspace_capability_packs/2` | 会话元数据、workspace 策略、回收 |
+| Control Plane | `Prehen.Workspace.SessionManager` | `lib/prehen/workspace/session_manager.ex` | `start_session/2`, `list_sessions/1`, `set_capability_packs/2` | 会话元数据、workspace 绑定策略、回收 |
 | Session Proc Supervision | `Prehen.Workspace.SessionSupervisor` | `lib/prehen/workspace/session_supervisor.ex` | `start_session/2`, `stop_session/1` | 负责 `Session` 子进程生命周期 |
 | Data Plane | `Prehen.Agent.Session` | `lib/prehen/agent/session.ex` | `prompt/3`, `steer/3`, `await_idle/2`, `snapshot/1` | 单会话执行引擎、队列与回合调度 |
 | Event Projection | `Prehen.Agent.EventBridge` | `lib/prehen/agent/event_bridge.ex` | `project/2` | 统一 event envelope 结构 |
