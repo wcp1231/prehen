@@ -4,6 +4,8 @@ defmodule Prehen.Agent.Strategies.ReactExtTest do
   alias Jido.Agent
   alias Jido.Agent.Strategy.State, as: StratState
   alias Jido.AI.Thread
+  alias Jido.AI.Strategies.ReAct
+  alias Prehen.Agent.Directive.LLMStream
   alias Prehen.Agent.Strategies.{ReactExt, ReactMachineExt}
 
   test "signal_routes include session steer/follow_up types" do
@@ -63,5 +65,77 @@ defmodule Prehen.Agent.Strategies.ReactExtTest do
     assert "tool_1" in updated_strategy_state.skipped_tool_calls
     assert "tool_2" in updated_strategy_state.skipped_tool_calls
     assert is_list(directives)
+  end
+
+  test "rewrites llm directive with request-scoped runtime candidates" do
+    ctx = %{
+      strategy_opts: [
+        tools: [Prehen.Actions.LS, Prehen.Actions.Read],
+        model: "openai:gpt-5-mini",
+        max_iterations: 4,
+        request_policy: :reject,
+        llm_runtime: %{
+          candidates: [
+            %{
+              model: "openai:gpt-5-mini",
+              params: %{temperature: 0.1, max_tokens: 1024},
+              request_opts: [api_key: "sk-a", base_url: "https://api.one.test/v1"],
+              on_errors: []
+            },
+            %{
+              model: "openai:gpt-5",
+              params: %{temperature: 0.2, max_tokens: 2048},
+              request_opts: [api_key: "sk-b"],
+              on_errors: [:timeout]
+            }
+          ]
+        }
+      ],
+      agent_module: __MODULE__
+    }
+
+    {agent, _} = ReactExt.init(%Agent{id: "agent_2", state: %{}}, ctx)
+
+    instruction =
+      Jido.Instruction.new!(%{
+        action: ReAct.start_action(),
+        params: %{query: "hello", request_id: "req_1"}
+      })
+
+    {_updated, directives} = ReactExt.cmd(agent, [instruction], ctx)
+
+    assert %LLMStream{} = Enum.find(directives, &match?(%LLMStream{}, &1))
+    llm = Enum.find(directives, &match?(%LLMStream{}, &1))
+
+    assert is_list(llm.candidates)
+    assert length(llm.candidates) == 2
+    assert hd(llm.candidates).model == "openai:gpt-5-mini"
+    assert Enum.at(llm.candidates, 1).on_errors == [:timeout]
+  end
+
+  test "model lifecycle events are kept in strategy snapshot details" do
+    ctx = %{
+      strategy_opts: [
+        tools: [Prehen.Actions.LS, Prehen.Actions.Read],
+        model: "openai:gpt-5-mini",
+        max_iterations: 4,
+        request_policy: :reject
+      ],
+      agent_module: __MODULE__
+    }
+
+    {agent, _} = ReactExt.init(%Agent{id: "agent_3", state: %{}}, ctx)
+
+    instruction =
+      Jido.Instruction.new!(%{
+        action: :prehen_model_event,
+        params: %{kind: :selected, call_id: "call_1", model: "openai:gpt-5-mini"}
+      })
+
+    {updated, _directives} = ReactExt.cmd(agent, [instruction], ctx)
+    snapshot = ReactExt.snapshot(updated, ctx)
+
+    assert [%{kind: :selected, call_id: "call_1", model: "openai:gpt-5-mini"}] =
+             snapshot.details.model_events
   end
 end

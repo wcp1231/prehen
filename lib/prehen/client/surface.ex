@@ -178,38 +178,45 @@ defmodule Prehen.Client.Surface do
   def run(task, opts \\ []) when is_binary(task) and is_list(opts) do
     config = Config.load(opts)
 
-    if config[:agent_backend] != Prehen.Agent.Backends.JidoAI do
-      case Runtime.run(task, opts) do
-        {:ok, result} -> {:ok, result}
-        {:error, reason} -> {:error, error_payload(:runtime_failed, reason)}
-      end
-    else
-      timeout = config[:timeout_ms] * max(config[:max_steps], 1) * 2
-      session_id = opts |> Keyword.get(:session_id) |> normalize_session_id()
+    cond do
+      config_error = config[:config_error] ->
+        {:error, error_payload(:runtime_failed, config_error)}
 
-      start_session =
-        if is_binary(session_id), do: resume_session(session_id, opts), else: create_session(opts)
+      config[:agent_backend] != Prehen.Agent.Backends.JidoAI ->
+        case Runtime.run(task, opts) do
+          {:ok, result} -> {:ok, result}
+          {:error, reason} -> {:error, error_payload(:runtime_failed, reason)}
+        end
 
-      case start_session do
-        {:ok, session} ->
-          try do
-            with {:ok, submit} <- submit_message(session.session_pid, task, kind: :prompt),
-                 {:ok, result} <- await_result(session.session_pid, timeout: timeout) do
-              {:ok,
-               result
-               |> Map.put_new(:session_id, session.session_id)
-               |> Map.put_new(:request_id, submit.request_id)}
-            else
-              {:error, _reason} = error ->
-                error
+      true ->
+        timeout = config[:timeout_ms] * max(config[:max_steps], 1) * 2
+        session_id = opts |> Keyword.get(:session_id) |> normalize_session_id()
+
+        start_session =
+          if is_binary(session_id),
+            do: resume_session(session_id, opts),
+            else: create_session(opts)
+
+        case start_session do
+          {:ok, session} ->
+            try do
+              with {:ok, submit} <- submit_message(session.session_pid, task, kind: :prompt),
+                   {:ok, result} <- await_result(session.session_pid, timeout: timeout) do
+                {:ok,
+                 result
+                 |> Map.put_new(:session_id, session.session_id)
+                 |> Map.put_new(:request_id, submit.request_id)}
+              else
+                {:error, _reason} = error ->
+                  error
+              end
+            after
+              maybe_stop_session(session.session_pid)
             end
-          after
-            maybe_stop_session(session.session_pid)
-          end
 
-        {:error, _reason} = error ->
-          error
-      end
+          {:error, _reason} = error ->
+            error
+        end
     end
   end
 

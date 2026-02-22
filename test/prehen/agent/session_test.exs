@@ -113,6 +113,20 @@ defmodule Prehen.Agent.SessionTest do
     assert List.last(result.trace).type == "ai.session.queue.drained"
   end
 
+  test "emits model fallback lifecycle events and marks fallback exhaustion reason" do
+    {:ok, session} = Session.start(base_config())
+    on_exit(fn -> Session.stop(session) end)
+
+    assert {:ok, _} = Session.prompt(session, "please trigger fallback-exhausted")
+    assert {:ok, result} = Session.await_idle(session, timeout: 3_000)
+
+    assert result.status == :error
+    assert match?({:model_fallback_exhausted, _}, result.reason)
+    assert Enum.any?(result.trace, &(&1.type == "ai.model.selected"))
+    assert Enum.any?(result.trace, &(&1.type == "ai.model.fallback"))
+    assert Enum.any?(result.trace, &(&1.type == "ai.model.exhausted"))
+  end
+
   test "persists turn context into session stm memory" do
     {:ok, session} = Session.start(base_config())
     on_exit(fn -> Session.stop(session) end)

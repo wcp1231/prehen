@@ -9,7 +9,7 @@
 ## MVP Scope
 
 已包含：
-- `prehen run "<task>"` 命令执行
+- `prehen run --agent <name> "<task>"` 命令执行
 - ReAct：`think -> action -> observation -> finish`
 - `max_steps` 与 LLM timeout 控制
 - 工具白名单与路径安全边界
@@ -33,39 +33,110 @@ mix deps.get
 
 ```bash
 mix escript.build
-./prehen run "列出 lib 并读取 prehen.ex"
+./prehen run --agent coder "列出 lib 并读取 prehen.ex"
 ```
 
 通过 Mix task：
 
 ```bash
-mix prehen.run "列出 lib 并读取 prehen.ex"
+mix prehen.run --agent coder "列出 lib 并读取 prehen.ex"
 ```
 
 ## CLI Options
 
 ```text
-prehen run "<task>" [--workspace PATH] [--session-id ID] [--max-steps N] [--timeout-ms N] [--model NAME] [--trace-json]
+prehen run --agent NAME "<task>" [--workspace PATH] [--session-id ID] [--max-steps N] [--timeout-ms N] [--trace-json]
 ```
 
 ## Configuration
 
-支持通过命令行参数或环境变量配置：
-- `PREHEN_MODEL`：模型名（默认 `openai:gpt-5-mini`，支持 `provider:model`；若仅填模型名会自动按 `openai:<model>` 处理）
-- `PREHEN_API_KEY`：模型 API key
-- `PREHEN_BASE_URL`：模型 base URL（可选）
-- `PREHEN_MAX_STEPS`：最大执行步数（默认 `8`）
-- `PREHEN_TIMEOUT_MS`：单次模型调用超时毫秒（默认 `15000`）
-- `PREHEN_SESSION_IDLE_TTL_MS`：会话空闲回收阈值毫秒（默认 `300000`）
-- `PREHEN_STM_BUFFER_LIMIT`：STM 对话缓冲区最大回合数（默认 `24`）
-- `PREHEN_STM_TOKEN_BUDGET`：STM token 预算上限（默认 `8000`，估算值）
-- `PREHEN_LTM_ADAPTER`：LTM adapter 名称（默认 `noop`，本次仅接口）
-- `PREHEN_WORKSPACE_DIR`：workspace 物理目录（默认 `$HOME/.prehen/workspace`）
-- `PREHEN_GLOBAL_DIR`：global 资源目录（默认 `$HOME/.prehen/global`）
-- `PREHEN_CAPABILITY_PACKS`：默认启用的 capability packs（逗号分隔，默认 `local_fs`）
-- `PREHEN_WORKSPACE_CAPABILITY_ALLOWLIST`：workspace 允许的 capability packs（逗号分隔，默认 `local_fs`）
-- `PREHEN_READ_MAX_BYTES`：`read` 最大返回字节数（默认 `8192`）
-- `PREHEN_TRACE_JSON`：是否输出 trace JSON（`true/false`）
+Provider / Model / Agent / Secret 通过结构化配置文件管理（不再使用环境变量承载这部分主配置）：
+- `$WORKSPACE_DIR/.prehen/config/providers.yaml`
+- `$WORKSPACE_DIR/.prehen/config/agents.yaml`
+- `$WORKSPACE_DIR/.prehen/config/runtime.yaml`
+- `$WORKSPACE_DIR/.prehen/config/secrets.yaml`
+- `$HOME/.prehen/global/config/*` 作为 fallback（workspace 优先）
+
+`models.yaml` 不是必需文件，模型目录直接定义在 `providers.yaml`（或 Agent 内联模型）中。
+
+`providers.yaml` 示例：
+
+```yaml
+providers:
+  openai_official:
+    kind: official
+    provider: openai
+    credentials:
+      api_key:
+        secret_ref: providers.openai_official.api_key
+    models:
+      - id: gpt-5-mini
+        name: GPT-5 Mini
+        default_params:
+          temperature: 0.2
+          max_tokens: 4096
+
+  qwen_compat:
+    kind: openai_compatible
+    provider: openai
+    endpoint: https://example.com/v1
+    credentials:
+      api_key:
+        secret_ref: providers.qwen_compat.api_key
+    models:
+      - id: qwen-plus
+        name: Qwen Plus
+```
+
+`agents.yaml` 示例：
+
+```yaml
+agents:
+  coder:
+    name: Coder
+    description: Code-focused assistant
+    system_prompt: |
+      You are Prehen Coder.
+    capability_packs: [local_fs]
+    model:
+      provider_ref: openai_official
+      model_id: gpt-5-mini
+      params:
+        temperature: 0.1
+        max_tokens: 6000
+    fallback_models:
+      - provider_ref: qwen_compat
+        model_id: qwen-plus
+        on_errors: [timeout, rate_limit, provider_error]
+        params:
+          temperature: 0.1
+          max_tokens: 6000
+```
+
+`secrets.yaml` 示例（单树结构，不按 dev/test/prod 分段）：
+
+```yaml
+secrets:
+  providers:
+    openai_official:
+      api_key: sk-...
+    qwen_compat:
+      api_key: sk-...
+```
+
+目前仍可通过环境变量配置运行时通用项（如路径/超时/trace）：
+- `PREHEN_WORKSPACE_DIR`
+- `PREHEN_GLOBAL_DIR`
+- `PREHEN_MAX_STEPS`
+- `PREHEN_TIMEOUT_MS`
+- `PREHEN_TRACE_JSON`
+- `PREHEN_SESSION_IDLE_TTL_MS`
+- `PREHEN_STM_BUFFER_LIMIT`
+- `PREHEN_STM_TOKEN_BUDGET`
+- `PREHEN_LTM_ADAPTER`
+- `PREHEN_CAPABILITY_PACKS`
+- `PREHEN_WORKSPACE_CAPABILITY_ALLOWLIST`
+- `PREHEN_READ_MAX_BYTES`
 
 workspace 目录结构：
 
@@ -115,6 +186,14 @@ $WORKSPACE_DIR/
 
 - 本项目按一次性切换策略演进，不维护长期 compat mode 双轨路径。
 - `trace_json` 已收敛为当前 schema（`schema_version: 2`），不再输出旧字段映射。
+- `--model` 已移除；CLI 通过 `--agent` 选择模板。
+
+## Model Fallback
+
+- 每次 LLM 请求按 `primary + fallback_models` 候选链执行。
+- 回退触发依据 `fallback_models[*].on_errors`。
+- 认证类错误默认不自动回退。
+- trace 中可观测事件：`ai.model.selected`、`ai.model.fallback`、`ai.model.exhausted`。
 
 ## Client Surface
 

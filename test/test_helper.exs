@@ -59,6 +59,7 @@ defmodule Prehen.Test.FakeSessionAdapter do
       query: query,
       started_at: now,
       delay_ms: request_delay(query),
+      model_exhausted?: String.contains?(query, "fallback-exhausted"),
       cancelled?: false,
       completed?: false
     }
@@ -116,12 +117,14 @@ defmodule Prehen.Test.FakeSessionAdapter do
           {:ok, idle_snapshot()}
         else
           tool_calls = tool_calls_for(request, elapsed_ms)
+          model_events = model_events_for(request, elapsed_ms)
 
           details = %{
             current_llm_call_id: request.call_id,
             streaming_text: streaming_text_for(elapsed_ms),
             thinking_trace: thinking_trace_for(request, elapsed_ms),
             tool_calls: tool_calls,
+            model_events: model_events,
             iteration: 1,
             active_request_id: request.id
           }
@@ -158,7 +161,12 @@ defmodule Prehen.Test.FakeSessionAdapter do
 
         now - request.started_at >= request.delay_ms ->
           mark_completed(pid, request_id)
-          {:ok, "answer:#{request.query}"}
+
+          if request.model_exhausted? do
+            {:error, {:provider_error, :timeout}}
+          else
+            {:ok, "answer:#{request.query}"}
+          end
 
         true ->
           Process.sleep(10)
@@ -213,6 +221,47 @@ defmodule Prehen.Test.FakeSessionAdapter do
             arguments: %{"path" => "."},
             status: :completed,
             result: {:ok, %{"path" => ".", "entries" => []}}
+          }
+        ]
+    end
+  end
+
+  defp model_events_for(%{model_exhausted?: false}, _elapsed_ms), do: []
+
+  defp model_events_for(request, elapsed_ms) do
+    selected = %{kind: :selected, call_id: request.call_id, model: "openai:gpt-5-mini"}
+
+    cond do
+      elapsed_ms < 40 ->
+        [selected]
+
+      elapsed_ms < 80 ->
+        [
+          selected,
+          %{
+            kind: :fallback,
+            call_id: request.call_id,
+            from_model: "openai:gpt-5-mini",
+            to_model: "openai:gpt-5",
+            error_type: :timeout
+          }
+        ]
+
+      true ->
+        [
+          selected,
+          %{
+            kind: :fallback,
+            call_id: request.call_id,
+            from_model: "openai:gpt-5-mini",
+            to_model: "openai:gpt-5",
+            error_type: :timeout
+          },
+          %{
+            kind: :exhausted,
+            call_id: request.call_id,
+            model: "openai:gpt-5",
+            error_type: :provider_error
           }
         ]
     end

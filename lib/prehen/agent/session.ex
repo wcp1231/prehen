@@ -331,6 +331,9 @@ defmodule Prehen.Agent.Session do
           stream_len: 0,
           partial_message: "",
           thinking_count: 0,
+          model_event_count: 0,
+          model_exhausted?: false,
+          model_error: nil,
           tool_states: %{},
           skipped_emitted?: false
         }
@@ -395,6 +398,7 @@ defmodule Prehen.Agent.Session do
         |> ingest_llm_delta(details)
         |> ingest_thinking(details)
         |> ingest_tool_calls(details)
+        |> ingest_model_events(details)
 
       {:error, _} ->
         state
@@ -567,25 +571,26 @@ defmodule Prehen.Agent.Session do
   end
 
   defp finalize_turn(state, {:error, reason}) do
+    normalized_reason = normalize_failure_reason(state, reason)
     partial = get_in(state, [:active, :partial_message]) || ""
-    working_context = %{last_turn_status: :error, last_error: inspect(reason)}
+    working_context = %{last_turn_status: :error, last_error: inspect(normalized_reason)}
 
     state =
       state
-      |> maybe_emit_aborted_response(partial, reason)
+      |> maybe_emit_aborted_response(partial, normalized_reason)
       |> maybe_emit_skipped_tool_results()
       |> emit("ai.request.failed", %{
         request_id: state.active.request_id,
         run_id: state.active.run_id,
         turn_id: state.active.turn_id,
-        error: reason
+        error: normalized_reason
       })
       |> emit("ai.session.turn.completed", %{
         request_id: state.active.request_id,
         run_id: state.active.run_id,
         turn_id: state.active.turn_id,
         outcome: :failed,
-        reason: reason
+        reason: normalized_reason
       })
       |> emit_turn_summary(%{
         input: state.active.item.text,
@@ -598,19 +603,19 @@ defmodule Prehen.Agent.Session do
         role: :assistant,
         content: partial,
         status: :failed,
-        reason: reason,
+        reason: normalized_reason,
         request_id: state.active.request_id,
         run_id: state.active.run_id,
         turn_id: state.active.turn_id
       })
       |> Map.put(:last_result, %{
         status: :error,
-        reason: reason,
-        answer: "执行失败：#{inspect(reason)}"
+        reason: normalized_reason,
+        answer: "执行失败：#{inspect(normalized_reason)}"
       })
       |> persist_memory_turn(%{
         status: :error,
-        reason: reason,
+        reason: normalized_reason,
         answer: partial,
         working_context: working_context
       })
@@ -681,6 +686,81 @@ defmodule Prehen.Agent.Session do
   end
 
   defp maybe_emit_skipped_tool_results(state), do: state
+
+  defp ingest_model_events(%{active: nil} = state, _details), do: state
+
+  defp ingest_model_events(%{active: active} = state, details) do
+    events = map_get(details, :model_events, [])
+
+    cond do
+      not is_list(events) ->
+        state
+
+      true ->
+        known_count = active.model_event_count || 0
+        new_events = Enum.drop(events, known_count)
+
+        state =
+          Enum.reduce(new_events, state, fn event, acc ->
+            emit_model_event(acc, event)
+          end)
+
+        next_state = put_in(state, [:active, :model_event_count], length(events))
+
+        if Enum.any?(new_events, fn event -> map_get(event, :kind) == :exhausted end) do
+          next_state
+          |> put_in([:active, :model_exhausted?], true)
+          |> put_in([:active, :model_error], List.last(new_events))
+        else
+          next_state
+        end
+    end
+  end
+
+  defp emit_model_event(state, event) when is_map(event) do
+    kind = map_get(event, :kind)
+
+    case kind do
+      :selected ->
+        emit(state, "ai.model.selected", %{
+          call_id: map_get(event, :call_id),
+          model: map_get(event, :model)
+        })
+
+      :fallback ->
+        emit(state, "ai.model.fallback", %{
+          call_id: map_get(event, :call_id),
+          from_model: map_get(event, :from_model),
+          to_model: map_get(event, :to_model),
+          error_type: map_get(event, :error_type),
+          error: map_get(event, :error)
+        })
+
+      :exhausted ->
+        emit(state, "ai.model.exhausted", %{
+          call_id: map_get(event, :call_id),
+          model: map_get(event, :model),
+          error_type: map_get(event, :error_type),
+          error: map_get(event, :error)
+        })
+
+      _ ->
+        state
+    end
+  end
+
+  defp emit_model_event(state, _event), do: state
+
+  defp normalize_failure_reason(%{active: %{model_exhausted?: true}} = state, reason) do
+    if match?({:model_fallback_exhausted, _}, reason) do
+      reason
+    else
+      {:model_fallback_exhausted,
+       %{reason: reason, model_error: get_in(state, [:active, :model_error])}}
+    end
+  end
+
+  defp normalize_failure_reason(_state, reason), do: reason
 
   defp clear_active(state) do
     state

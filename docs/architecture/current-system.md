@@ -207,6 +207,10 @@ sequenceDiagram
 ## 5. 当前边界与约束
 
 - 架构定位：平台化方向，支持单进程单 workspace 下的 multi-session 与可扩展 memory contract。
+- 配置入口：Provider/Agent/Secret 采用结构化配置（`providers.yaml`/`agents.yaml`/`secrets.yaml`），CLI 主入口为 `--agent`。
+- 配置解析：`workspace > global > defaults`，并返回结构化错误（包含 code/file/path/detail）。
+- LLM 注入：采用 Route B，请求级注入 `api_key/base_url/provider_options/model params`，不再通过全局可变 Provider 配置共享。
+- 模型回退：支持 primary + fallback 链；认证类错误默认不自动回退；可观测事件包括 `ai.model.selected/fallback/exhausted`。
 - LTM：当前阶段仅接口契约与 adapter 注册/选择，不提供默认持久化实现。
 - 安全：MVP 阶段客户端直连，不包含认证/鉴权。
 - 兼容策略：采用一次性切换，不维护长期双轨兼容。
@@ -244,11 +248,15 @@ sequenceDiagram
 | 层/主题 | 模块 | 源码文件 | 关键入口 | 说明 |
 |---|---|---|---|---|
 | Public API | `Prehen` | `lib/prehen.ex` | `run/2`, `create_session/1`, `submit_message/3` | 平台统一入口，转发到 `Surface` |
+| Config | `Prehen.Config` | `lib/prehen/config.ex` | `load/1` | 统一配置加载入口（结构化配置 + defaults + runtime） |
+| Structured Config | `Prehen.Config.Structured` | `lib/prehen/config/structured.ex` | `load/2`, `resolve_agent/3` | Provider/Agent/Secret 解析、校验与 `secret_ref` 解析 |
 | Client Surface | `Prehen.Client.Surface` | `lib/prehen/client/surface.ex` | `create_session/1`, `resume_session/2`, `await_result/2`, `subscribe_events/1` | 给 CLI/Web/Native 提供统一 contract |
 | Runtime Facade | `Prehen.Agent.Runtime` | `lib/prehen/agent/runtime.ex` | `start_session/1`, `resume_session/2`, `session_status/1`, `replay_session/2` | 隐藏会话内部编排细节 |
 | Control Plane | `Prehen.Workspace.SessionManager` | `lib/prehen/workspace/session_manager.ex` | `start_session/2`, `list_sessions/1`, `set_capability_packs/2` | 会话元数据、workspace 绑定策略、回收 |
 | Session Proc Supervision | `Prehen.Workspace.SessionSupervisor` | `lib/prehen/workspace/session_supervisor.ex` | `start_session/2`, `stop_session/1` | 负责 `Session` 子进程生命周期 |
 | Data Plane | `Prehen.Agent.Session` | `lib/prehen/agent/session.ex` | `prompt/3`, `steer/3`, `await_idle/2`, `snapshot/1` | 单会话执行引擎、队列与回合调度 |
+| LLM Fallback Policy | `Prehen.Agent.ModelFallback` | `lib/prehen/agent/model_fallback.ex` | `should_fallback?/2`, `next_candidate/3` | fallback 判定规则（含 auth 不自动回退） |
+| Request-scoped LLM Directive | `Prehen.Agent.Directive.LLMStream` | `lib/prehen/agent/directive/llm_stream.ex` | `new!/1` + `DirectiveExec` | 请求级 LLM 参数注入与 fallback 执行 |
 | Event Projection | `Prehen.Agent.EventBridge` | `lib/prehen/agent/event_bridge.ex` | `project/2` | 统一 event envelope 结构 |
 | Canonical Facts | `Prehen.Conversation.Store` | `lib/prehen/conversation/store.ex` | `write/2`, `write_many/2`, `replay/2` | ledger-first 事实流 facade（event/message） |
 | Session Ledger | `Prehen.Conversation.SessionLedger` | `lib/prehen/conversation/session_ledger.ex` | `append/2`, `replay/1`, `sync/1` | 文件持久化 `<session_id>.jsonl` 与回放/校验 |

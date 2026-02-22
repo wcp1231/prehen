@@ -139,4 +139,77 @@ defmodule Prehen.Client.SurfaceTest do
     assert error.type == :session_create_failed
     assert match?({:workspace_mismatch, _}, error.reason)
   end
+
+  test "run returns unified error when agent template is unknown" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "prehen_surface_unknown_agent_#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(Path.join([workspace, ".prehen", "config"]))
+
+    Application.put_env(:prehen, :agent_backend, Prehen.Agent.Backends.JidoAI)
+    Application.put_env(:prehen, :session_adapter, Prehen.Test.FakeSessionAdapter)
+
+    on_exit(fn ->
+      Application.delete_env(:prehen, :agent_backend)
+      Application.delete_env(:prehen, :session_adapter)
+      File.rm_rf(workspace)
+    end)
+
+    assert {:error, error} = Surface.run("hello", workspace: workspace, agent: "missing")
+    assert error.type == :runtime_failed
+    assert error.reason.code == :agent_template_not_found
+  end
+
+  test "run returns unified error when secret_ref cannot be resolved" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "prehen_surface_secret_missing_#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(Path.join([workspace, ".prehen", "config"]))
+
+    File.write!(
+      Path.join([workspace, ".prehen", "config", "providers.yaml"]),
+      """
+      providers:
+        openai_official:
+          kind: official
+          provider: openai
+          credentials:
+            api_key:
+              secret_ref: providers.openai_official.api_key
+          models:
+            - id: gpt-5-mini
+              name: GPT-5 Mini
+      """
+    )
+
+    File.write!(
+      Path.join([workspace, ".prehen", "config", "agents.yaml"]),
+      """
+      agents:
+        coder:
+          model:
+            provider_ref: openai_official
+            model_id: gpt-5-mini
+      """
+    )
+
+    Application.put_env(:prehen, :agent_backend, Prehen.Agent.Backends.JidoAI)
+    Application.put_env(:prehen, :session_adapter, Prehen.Test.FakeSessionAdapter)
+
+    on_exit(fn ->
+      Application.delete_env(:prehen, :agent_backend)
+      Application.delete_env(:prehen, :session_adapter)
+      File.rm_rf(workspace)
+    end)
+
+    assert {:error, error} = Surface.run("hello", workspace: workspace, agent: "coder")
+    assert error.type == :runtime_failed
+    assert error.reason.code == :secret_ref_not_found
+  end
 end

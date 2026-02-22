@@ -3,7 +3,7 @@ defmodule Prehen.CLI do
 
   @usage """
   Usage:
-    prehen run "<task>" [--workspace PATH] [--session-id ID] [--max-steps N] [--timeout-ms N] [--model NAME] [--trace-json]
+    prehen run --agent NAME "<task>" [--workspace PATH] [--session-id ID] [--max-steps N] [--timeout-ms N] [--trace-json]
   """
 
   @spec main([String.t()]) :: {:ok, map()} | {:error, term()}
@@ -13,9 +13,9 @@ defmodule Prehen.CLI do
         strict: [
           workspace: :string,
           session_id: :string,
+          agent: :string,
           max_steps: :integer,
           timeout_ms: :integer,
-          model: :string,
           trace_json: :boolean
         ]
       )
@@ -47,10 +47,18 @@ defmodule Prehen.CLI do
           |> String.trim_leading("-")
           |> String.replace("_", "-")
 
-        if normalized == "root-dir" do
-          IO.puts(:stderr, "Invalid option: --root-dir (removed). Use --workspace PATH instead.")
-        else
-          IO.puts(:stderr, "Invalid option: --#{normalized}")
+        cond do
+          normalized == "root-dir" ->
+            IO.puts(
+              :stderr,
+              "Invalid option: --root-dir (removed). Use --workspace PATH instead."
+            )
+
+          normalized == "model" ->
+            IO.puts(:stderr, "Invalid option: --model (removed). Use --agent NAME.")
+
+          true ->
+            IO.puts(:stderr, "Invalid option: --#{normalized}")
         end
 
       other ->
@@ -63,6 +71,12 @@ defmodule Prehen.CLI do
   end
 
   defp run_task(task, opts) do
+    opts =
+      case normalize_agent(Keyword.get(opts, :agent)) do
+        nil -> Keyword.delete(opts, :agent)
+        agent -> Keyword.put(opts, :agent, agent)
+      end
+
     case Prehen.Client.Surface.run(task, opts) do
       {:ok, result} ->
         print_result(result, opts)
@@ -73,6 +87,15 @@ defmodule Prehen.CLI do
         {:error, result}
     end
   end
+
+  defp normalize_agent(agent) when is_binary(agent) do
+    case String.trim(agent) do
+      "" -> nil
+      normalized -> normalized
+    end
+  end
+
+  defp normalize_agent(_), do: nil
 
   defp print_result(result, opts) do
     if Keyword.get(opts, :trace_json, false) do

@@ -8,11 +8,19 @@
 - **THEN** 系统 SHALL 返回统一结构的恢复结果，供后续 `submit_message` 与 `await_result` 复用，且不包含 `workspace_id`
 
 ### Requirement: 统一多端会话 API
-系统 MUST 为 CLI、Web、Native 暴露统一会话生命周期 API（创建、恢复、提交消息、状态查询、停止），并以进程绑定 workspace 的方式运行。
+系统 MUST 为 CLI、Web、Native 暴露统一会话生命周期 API（创建、恢复、提交消息、状态查询、停止），并以进程绑定 workspace 的方式运行，且支持通过 Agent 模板名称驱动执行配置。
 
 #### Scenario: 不同客户端调用同一会话接口
 - **WHEN** CLI 与 Web 客户端分别调用创建/恢复与提交消息接口
 - **THEN** 系统 SHALL 使用一致的请求结构与返回结构处理两端请求，且不要求每次请求显式携带 workspace 参数
+
+#### Scenario: 客户端按 Agent 模板创建并执行会话
+- **WHEN** 客户端在创建会话或一站式运行入口中提供 `agent` 名称
+- **THEN** 系统 SHALL 解析对应模板并使用模板配置处理后续消息执行
+
+#### Scenario: 客户端提供未知 Agent 模板
+- **WHEN** 客户端提供不存在的 `agent` 名称
+- **THEN** 系统 SHALL 返回统一错误结构并标识 `agent_template_not_found`
 
 #### Scenario: 客户端显式覆盖不同 workspace
 - **WHEN** 客户端在已绑定进程中显式传入与当前绑定不一致的 workspace 路径
@@ -51,7 +59,15 @@
 - **THEN** 系统 SHALL 在后续回执与事件中继续输出同一 `session_id`
 
 ### Requirement: 统一错误与超时语义
-系统 MUST 定义统一错误结构与超时行为，避免不同客户端出现歧义；恢复场景下 ledger 损坏 SHALL 返回统一恢复失败错误结构。
+系统 MUST 定义统一错误结构与超时行为，避免不同客户端出现歧义；恢复场景下 ledger 损坏 SHALL 返回统一恢复失败错误结构；在模板解析失败、密钥引用失败、模型回退耗尽场景下也 SHALL 返回统一错误结构。
+
+#### Scenario: 模板存在但 secret_ref 缺失
+- **WHEN** 客户端调用使用某 Agent 模板，且模板所依赖的 `secret_ref` 无法解析
+- **THEN** 系统 SHALL 返回统一错误结构并包含 `secret_ref_not_found` 诊断原因
+
+#### Scenario: 模型回退链耗尽
+- **WHEN** 主模型与所有 fallback 模型均执行失败
+- **THEN** 系统 SHALL 返回统一错误结构并标识回退链已耗尽
 
 #### Scenario: 客户端请求超时
 - **WHEN** 消息提交请求超过配置超时阈值

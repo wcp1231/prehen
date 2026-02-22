@@ -27,7 +27,8 @@ defmodule Prehen.MixProject do
       {:jido_action, github: "agentjido/jido_action", branch: "main", override: true, depth: 1},
       {:jido_ai, github: "agentjido/jido_ai", branch: "main", depth: 1},
       {:req_llm, github: "agentjido/req_llm", branch: "main", override: true, depth: 1},
-      {:jason, "~> 1.4"}
+      {:jason, "~> 1.4"},
+      {:yaml_elixir, "~> 2.12"}
     ]
   end
 end

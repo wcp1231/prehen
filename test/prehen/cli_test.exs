@@ -76,6 +76,88 @@ defmodule Prehen.CLITest do
     assert stderr =~ "Invalid option: --root-dir (removed). Use --workspace PATH instead."
   end
 
+  test "cli rejects removed --model option with explicit message" do
+    stderr =
+      capture_io(:stderr, fn ->
+        assert {:error, :invalid_args} =
+                 Prehen.CLI.main(["run", "task", "--model", "openai:gpt-5-mini"])
+      end)
+
+    assert stderr =~ "Invalid option: --model (removed). Use --agent NAME."
+  end
+
+  test "cli run supports --agent template execution path" do
+    workspace = Application.fetch_env!(:prehen, :workspace_dir)
+    config_dir = Path.join([workspace, ".prehen", "config"])
+    File.mkdir_p!(config_dir)
+
+    providers_path = Path.join(config_dir, "providers.yaml")
+    agents_path = Path.join(config_dir, "agents.yaml")
+    secrets_path = Path.join(config_dir, "secrets.yaml")
+    backups = backup_files([providers_path, agents_path, secrets_path])
+
+    File.write!(
+      providers_path,
+      """
+      providers:
+        openai_official:
+          kind: official
+          provider: openai
+          credentials:
+            api_key:
+              secret_ref: providers.openai_official.api_key
+          models:
+            - id: gpt-5-mini
+              name: GPT-5 Mini
+      """
+    )
+
+    File.write!(
+      agents_path,
+      """
+      agents:
+        coder_cli:
+          model:
+            provider_ref: openai_official
+            model_id: gpt-5-mini
+          capability_packs: [local_fs]
+      """
+    )
+
+    File.write!(
+      secrets_path,
+      """
+      secrets:
+        providers:
+          openai_official:
+            api_key: sk-local
+      """
+    )
+
+    Application.put_env(:prehen, :agent_backend, Prehen.Agent.Backends.JidoAI)
+    Application.put_env(:prehen, :session_adapter, Prehen.Test.FakeSessionAdapter)
+
+    on_exit(fn ->
+      Application.delete_env(:prehen, :agent_backend)
+      Application.delete_env(:prehen, :session_adapter)
+      restore_files(backups)
+    end)
+
+    output =
+      capture_io(fn ->
+        assert {:ok, %{status: :ok}} =
+                 Prehen.CLI.main([
+                   "run",
+                   "--agent",
+                   "coder_cli",
+                   "hello"
+                 ])
+      end)
+
+    assert output =~ "Answer:"
+    assert output =~ "answer:hello"
+  end
+
   test "trace_json outputs typed envelope schema without legacy fields" do
     Application.put_env(:prehen, :agent_backend, Prehen.Agent.Backends.JidoAI)
     Application.put_env(:prehen, :session_adapter, Prehen.Test.FakeSessionAdapter)
@@ -151,5 +233,27 @@ defmodule Prehen.CLITest do
     [_, trace_and_answer] = String.split(output, "Trace:\n", parts: 2)
     [trace_json, _answer] = String.split(trace_and_answer, "\nAnswer:\n", parts: 2)
     Jason.decode!(String.trim(trace_json))
+  end
+
+  defp backup_files(paths) do
+    Enum.map(paths, fn path ->
+      if File.exists?(path) do
+        {:ok, content} = File.read(path)
+        {path, {:existing, content}}
+      else
+        {path, :missing}
+      end
+    end)
+  end
+
+  defp restore_files(backups) do
+    Enum.each(backups, fn
+      {path, {:existing, content}} ->
+        File.mkdir_p!(Path.dirname(path))
+        File.write!(path, content)
+
+      {path, :missing} ->
+        File.rm(path)
+    end)
   end
 end

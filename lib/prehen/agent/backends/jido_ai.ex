@@ -3,6 +3,12 @@ defmodule Prehen.Agent.Backends.JidoAI do
 
   @behaviour Prehen.Agent.Backend
   @jido_instance Prehen.JidoRuntime
+  @default_model "openai:gpt-5-mini"
+  @default_system_prompt """
+  You are Prehen, a local file analysis agent.
+  Use tools when you need filesystem facts.
+  Keep final answers concise and accurate.
+  """
 
   alias Prehen.Agent.EventBridge
 
@@ -39,7 +45,6 @@ defmodule Prehen.Agent.Backends.JidoAI do
   def start_agent(config) do
     with :ok <- ensure_prerequisites(),
          :ok <- ensure_jido_runtime(),
-         :ok <- configure_req_llm(config),
          module <- create_ephemeral_agent_module(config),
          {:ok, pid} <- Jido.AgentServer.start(agent: module, jido: @jido_instance) do
       {:ok, %{module: module, pid: pid}}
@@ -111,67 +116,14 @@ defmodule Prehen.Agent.Backends.JidoAI do
        }}
   end
 
-  defp configure_req_llm(config) do
-    model = normalize_model_spec(config[:model])
-    provider = provider_from_model(model)
-    put_model_alias(model)
-
-    if is_binary(config[:api_key]) and String.trim(config[:api_key]) != "" do
-      ReqLLM.put_key(:"#{provider}_api_key", config[:api_key])
-    end
-
-    if is_binary(config[:base_url]) and String.trim(config[:base_url]) != "" do
-      provider_cfg = Application.get_env(:req_llm, provider, [])
-
-      Application.put_env(
-        :req_llm,
-        provider,
-        Keyword.put(provider_cfg, :base_url, config[:base_url])
-      )
-    end
-
-    :ok
-  end
-
-  defp normalize_model_spec(model) when is_binary(model) do
-    normalized = String.trim(model)
-
-    cond do
-      normalized == "" ->
-        "openai:gpt-5-mini"
-
-      String.contains?(normalized, ":") ->
-        normalized
-
-      true ->
-        "openai:#{normalized}"
-    end
-  end
-
-  defp normalize_model_spec(_), do: "openai:gpt-5-mini"
-
-  defp put_model_alias(model) do
-    aliases = Application.get_env(:jido_ai, :model_aliases, %{})
-    Application.put_env(:jido_ai, :model_aliases, Map.put(aliases, :prehen, model))
-  end
-
-  defp provider_from_model(model) when is_binary(model) do
-    with [provider_name | _] <- String.split(model, ":", parts: 2),
-         true <- provider_name != "" do
-      ReqLLM.Providers.list()
-      |> Enum.find(:openai, fn provider -> Atom.to_string(provider) == provider_name end)
-    else
-      _ -> :openai
-    end
-  end
-
-  defp provider_from_model(_), do: :openai
-
   defp create_ephemeral_agent_module(config) do
     suffix = :erlang.unique_integer([:positive])
     module = Module.concat([Prehen, Agent, RuntimeAgent, :"M#{suffix}"])
     max_iterations = config[:max_steps] || 8
     tools = resolve_tools(config)
+    system_prompt = normalize_system_prompt(config[:system_prompt])
+    llm_runtime = build_llm_runtime(config)
+    primary_model = llm_runtime.primary_model
 
     contents =
       quote do
@@ -182,18 +134,15 @@ defmodule Prehen.Agent.Backends.JidoAI do
           strategy:
             {Prehen.Agent.Strategies.ReactExt,
              tools: unquote(tools),
-             model: :prehen,
+             model: unquote(primary_model),
+             llm_runtime: unquote(Macro.escape(llm_runtime.runtime)),
              max_iterations: unquote(max_iterations),
              request_policy: :reject,
-             system_prompt: """
-             You are Prehen, a local file analysis agent.
-             Use tools when you need filesystem facts.
-             Keep final answers concise and accurate.
-             """},
+             system_prompt: unquote(system_prompt)},
           schema:
             Zoi.object(%{
               __strategy__: Zoi.map() |> Zoi.default(%{}),
-              model: Zoi.string() |> Zoi.default("prehen"),
+              model: Zoi.string() |> Zoi.default(unquote(primary_model)),
               last_query: Zoi.string() |> Zoi.default(""),
               last_answer: Zoi.string() |> Zoi.default(""),
               completed: Zoi.boolean() |> Zoi.default(false)
@@ -302,7 +251,9 @@ defmodule Prehen.Agent.Backends.JidoAI do
 
                   snapshot.done? and active_request_id == request_id and
                       snapshot.status == :failure ->
-                    {:error, {:failed, details[:termination_reason], snapshot.result}}
+                    {:error,
+                     {:failed, details[:termination_reason], snapshot.result,
+                      %{model_events: details[:model_events], model_error: details[:model_error]}}}
 
                   true ->
                     Process.sleep(20)
@@ -331,6 +282,246 @@ defmodule Prehen.Agent.Backends.JidoAI do
         [Prehen.Actions.LS, Prehen.Actions.Read]
     end
   end
+
+  defp build_llm_runtime(config) do
+    candidates =
+      case Map.get(config, :model_candidates) do
+        list when is_list(list) and list != [] ->
+          Enum.map(list, &normalize_candidate/1)
+
+        _ ->
+          [legacy_candidate(config)]
+      end
+
+    primary_model =
+      candidates
+      |> List.first()
+      |> case do
+        %{model: model} when is_binary(model) and model != "" -> model
+        _ -> @default_model
+      end
+
+    %{
+      primary_model: primary_model,
+      runtime: %{candidates: candidates}
+    }
+  end
+
+  defp legacy_candidate(config) do
+    request_opts =
+      []
+      |> put_if_present(:api_key, config[:api_key])
+      |> put_if_present(:base_url, config[:base_url])
+
+    %{
+      provider_ref: "__runtime__",
+      provider: provider_from_model_spec(config[:model]),
+      model_id: model_id_from_spec(config[:model]),
+      model_name: model_id_from_spec(config[:model]),
+      model: normalize_model_spec(config[:model]),
+      params: normalize_model_params(Map.get(config, :model_params)),
+      request_opts: request_opts,
+      on_errors: []
+    }
+  end
+
+  defp normalize_candidate(%{} = candidate) do
+    request_opts =
+      candidate
+      |> Map.get(:request_opts, Map.get(candidate, "request_opts", []))
+      |> normalize_request_opts()
+
+    params =
+      candidate
+      |> Map.get(:params, Map.get(candidate, "params", %{}))
+      |> normalize_model_params()
+
+    on_errors =
+      candidate
+      |> Map.get(:on_errors, Map.get(candidate, "on_errors", []))
+      |> normalize_on_errors()
+
+    %{
+      provider_ref: Map.get(candidate, :provider_ref, Map.get(candidate, "provider_ref")),
+      provider: Map.get(candidate, :provider, Map.get(candidate, "provider")),
+      model_id: Map.get(candidate, :model_id, Map.get(candidate, "model_id")),
+      model_name: Map.get(candidate, :model_name, Map.get(candidate, "model_name")),
+      model: normalize_model_spec(Map.get(candidate, :model, Map.get(candidate, "model"))),
+      params: params,
+      request_opts: request_opts,
+      on_errors: on_errors
+    }
+  end
+
+  defp normalize_candidate(_), do: legacy_candidate(%{model: @default_model})
+
+  defp normalize_request_opts(opts) when is_list(opts) do
+    opts
+    |> Enum.reduce([], fn
+      {key, value}, acc when key in [:api_key, :base_url] ->
+        put_if_present(acc, key, value)
+
+      {:provider_options, value}, acc when is_list(value) ->
+        Keyword.put(acc, :provider_options, Enum.filter(value, &match?({_, _}, &1)))
+
+      {"api_key", value}, acc ->
+        put_if_present(acc, :api_key, value)
+
+      {"base_url", value}, acc ->
+        put_if_present(acc, :base_url, value)
+
+      {"provider_options", value}, acc when is_map(value) ->
+        provider_options =
+          Enum.map(value, fn {k, v} ->
+            {to_atom_key(k), v}
+          end)
+
+        Keyword.put(acc, :provider_options, provider_options)
+
+      _entry, acc ->
+        acc
+    end)
+  end
+
+  defp normalize_request_opts(%{} = opts) do
+    []
+    |> put_if_present(:api_key, Map.get(opts, :api_key, Map.get(opts, "api_key")))
+    |> put_if_present(:base_url, Map.get(opts, :base_url, Map.get(opts, "base_url")))
+    |> case do
+      acc ->
+        provider_options = Map.get(opts, :provider_options, Map.get(opts, "provider_options"))
+
+        if is_map(provider_options) do
+          Keyword.put(
+            acc,
+            :provider_options,
+            Enum.map(provider_options, fn {k, v} -> {to_atom_key(k), v} end)
+          )
+        else
+          acc
+        end
+    end
+  end
+
+  defp normalize_request_opts(_), do: []
+
+  defp normalize_model_spec(model) when is_binary(model) do
+    normalized = String.trim(model)
+
+    cond do
+      normalized == "" -> @default_model
+      String.contains?(normalized, ":") -> normalized
+      true -> "openai:#{normalized}"
+    end
+  end
+
+  defp normalize_model_spec(_), do: @default_model
+
+  defp normalize_model_params(nil), do: %{}
+
+  defp normalize_model_params(%{} = params) do
+    Enum.reduce(params, %{}, fn {key, value}, acc ->
+      normalized_key =
+        key
+        |> to_string()
+        |> String.trim()
+        |> String.downcase()
+
+      case {normalized_key, value} do
+        {"temperature", val} when is_integer(val) ->
+          Map.put(acc, :temperature, val * 1.0)
+
+        {"temperature", val} when is_float(val) ->
+          Map.put(acc, :temperature, val)
+
+        {"temperature", val} when is_binary(val) ->
+          case Float.parse(String.trim(val)) do
+            {parsed, ""} -> Map.put(acc, :temperature, parsed)
+            _ -> acc
+          end
+
+        {"max_tokens", val} when is_integer(val) ->
+          Map.put(acc, :max_tokens, val)
+
+        {"max_tokens", val} when is_binary(val) ->
+          case Integer.parse(String.trim(val)) do
+            {parsed, ""} -> Map.put(acc, :max_tokens, parsed)
+            _ -> acc
+          end
+
+        {other, val} ->
+          Map.put(acc, to_atom_key(other), val)
+      end
+    end)
+  end
+
+  defp normalize_model_params(_), do: %{}
+
+  defp normalize_on_errors(list) when is_list(list) do
+    list
+    |> Enum.map(fn
+      atom when is_atom(atom) ->
+        atom
+
+      binary when is_binary(binary) ->
+        binary |> String.trim() |> String.downcase() |> String.to_atom()
+
+      _ ->
+        nil
+    end)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+  end
+
+  defp normalize_on_errors(_), do: []
+
+  defp provider_from_model_spec(model_spec) when is_binary(model_spec) do
+    case String.split(normalize_model_spec(model_spec), ":", parts: 2) do
+      [provider, _model_id] -> provider
+      _ -> "openai"
+    end
+  end
+
+  defp provider_from_model_spec(_), do: "openai"
+
+  defp model_id_from_spec(model_spec) when is_binary(model_spec) do
+    case String.split(normalize_model_spec(model_spec), ":", parts: 2) do
+      [_provider, model_id] -> model_id
+      _ -> "gpt-5-mini"
+    end
+  end
+
+  defp model_id_from_spec(_), do: "gpt-5-mini"
+
+  defp normalize_system_prompt(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> @default_system_prompt
+      _ -> value
+    end
+  end
+
+  defp normalize_system_prompt(_), do: @default_system_prompt
+
+  defp put_if_present(list, _key, nil), do: list
+
+  defp put_if_present(list, _key, value) when is_binary(value) and value == "",
+    do: list
+
+  defp put_if_present(list, key, value), do: Keyword.put(list, key, value)
+
+  defp to_atom_key(key) when is_atom(key), do: key
+
+  defp to_atom_key(key) when is_binary(key) do
+    normalized = String.trim(key)
+
+    try do
+      String.to_existing_atom(normalized)
+    rescue
+      ArgumentError -> String.to_atom(normalized)
+    end
+  end
+
+  defp to_atom_key(key), do: key |> to_string() |> to_atom_key()
 
   defp format_success(answer, status) do
     steps = extract_steps(status)

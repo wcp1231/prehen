@@ -24,10 +24,14 @@ defmodule Prehen.Agent.Runtime do
     config = Config.load(opts)
     backend = config[:agent_backend]
 
-    if backend == Prehen.Agent.Backends.JidoAI do
-      run_via_session(task, config)
+    if config_error = config[:config_error] do
+      {:error, config_error}
     else
-      backend.run(task, config)
+      if backend == Prehen.Agent.Backends.JidoAI do
+        run_via_session(task, config)
+      else
+        backend.run(task, config)
+      end
     end
   end
 
@@ -35,19 +39,23 @@ defmodule Prehen.Agent.Runtime do
   def start_session(opts \\ []) do
     config = Config.load(opts)
 
-    manager_opts =
-      opts
-      |> Keyword.take([
-        :name,
-        :capability_packs,
-        :capability_allowlist,
-        :workspace,
-        :workspace_dir
-      ])
+    if config_error = config[:config_error] do
+      {:error, config_error}
+    else
+      manager_opts =
+        opts
+        |> Keyword.take([
+          :name,
+          :capability_packs,
+          :capability_allowlist,
+          :workspace,
+          :workspace_dir
+        ])
 
-    case SessionManager.start_session(config, manager_opts) do
-      {:ok, %{pid: session_pid}} -> {:ok, session_pid}
-      {:error, reason} -> {:error, reason}
+      case SessionManager.start_session(config, manager_opts) do
+        {:ok, %{pid: session_pid}} -> {:ok, session_pid}
+        {:error, reason} -> {:error, reason}
+      end
     end
   end
 
@@ -55,19 +63,23 @@ defmodule Prehen.Agent.Runtime do
   def resume_session(session_id, opts \\ []) when is_binary(session_id) do
     config = Config.load(opts)
 
-    manager_opts =
-      opts
-      |> Keyword.take([
-        :name,
-        :capability_packs,
-        :capability_allowlist,
-        :workspace,
-        :workspace_dir
-      ])
+    if config_error = config[:config_error] do
+      {:error, config_error}
+    else
+      manager_opts =
+        opts
+        |> Keyword.take([
+          :name,
+          :capability_packs,
+          :capability_allowlist,
+          :workspace,
+          :workspace_dir
+        ])
 
-    case SessionManager.resume_session(session_id, config, manager_opts) do
-      {:ok, %{pid: session_pid}} -> {:ok, session_pid}
-      {:error, reason} -> {:error, reason}
+      case SessionManager.resume_session(session_id, config, manager_opts) do
+        {:ok, %{pid: session_pid}} -> {:ok, session_pid}
+        {:error, reason} -> {:error, reason}
+      end
     end
   end
 
