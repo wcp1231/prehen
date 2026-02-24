@@ -13,6 +13,12 @@ export interface ToolCall {
   result?: unknown;
 }
 
+export interface MessageError {
+  code: string;
+  message: string;
+  details?: unknown;
+}
+
 export interface Message {
   id: string;
   role: "user" | "assistant";
@@ -20,6 +26,7 @@ export interface Message {
   toolCalls: ToolCall[];
   thinking: string;
   isStreaming: boolean;
+  error?: MessageError;
 }
 
 export interface SessionState {
@@ -315,9 +322,19 @@ function handleTurnCompleted() {
 
 function handleRequestFailed(payload: Record<string, unknown>) {
   getOrCreateAssistantMessage();
+
+  const rawError = payload.error as Record<string, unknown> | undefined;
+  const error: MessageError = rawError && typeof rawError === "object"
+    ? {
+        code: (rawError.code as string) || "unknown",
+        message: (rawError.message as string) || "Request failed",
+        ...(rawError.details != null ? { details: rawError.details } : {}),
+      }
+    : { code: "unknown", message: String(payload.error || "Request failed") };
+
   updateLastAssistantMessage((msg) => ({
     ...msg,
-    content: msg.content || `Error: ${payload.error || "Request failed"}`,
+    error,
     isStreaming: false,
   }));
 }

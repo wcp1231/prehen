@@ -91,6 +91,112 @@ defmodule PrehenWeb.EventSerializerTest do
       assert result == %{"session_id" => "s1", "already_string" => "v"}
     end
 
+    # -- normalize_error/1 tests (via ai.request.failed events) --
+
+    test "normalizes structured map error with :code key" do
+      event = %{
+        type: "ai.request.failed",
+        error: %{
+          code: :llm_stream_exception,
+          error_type: :rate_limit,
+          reason: "429 Too Many Requests",
+          model: "gpt-4"
+        }
+      }
+
+      result = EventSerializer.serialize(event)
+      error = result["error"]
+
+      assert error["code"] == "llm_stream_exception"
+      assert error["message"] == "429 Too Many Requests"
+      assert error["details"]["error_type"] == "rate_limit"
+      assert error["details"]["model"] == "gpt-4"
+    end
+
+    test "normalizes {:model_fallback_exhausted, %{...}} tuple" do
+      event = %{
+        type: "ai.request.failed",
+        error:
+          {:model_fallback_exhausted,
+           %{
+             reason: "all models failed",
+             model_error: %{reason: "Rate limit exceeded (429)"}
+           }}
+      }
+
+      result = EventSerializer.serialize(event)
+      error = result["error"]
+
+      assert error["code"] == "model_fallback_exhausted"
+      assert error["message"] == "Rate limit exceeded (429)"
+      assert is_map(error["details"])
+    end
+
+    test "normalizes {:await_crash, reason} tuple" do
+      event = %{
+        type: "ai.request.failed",
+        error: {:await_crash, :noproc}
+      }
+
+      result = EventSerializer.serialize(event)
+      error = result["error"]
+
+      assert error["code"] == "await_crash"
+      assert error["message"] == "Session process crashed"
+      assert error["details"]["reason"] == ":noproc"
+    end
+
+    test "normalizes {:cancelled, :steering} tuple" do
+      event = %{
+        type: "ai.request.failed",
+        error: {:cancelled, :steering}
+      }
+
+      result = EventSerializer.serialize(event)
+      error = result["error"]
+
+      assert error["code"] == "cancelled"
+      assert error["message"] == "Request cancelled by user"
+      refute Map.has_key?(error, "details")
+    end
+
+    test "normalizes :timeout atom error" do
+      event = %{
+        type: "ai.request.failed",
+        error: :timeout
+      }
+
+      result = EventSerializer.serialize(event)
+      error = result["error"]
+
+      assert error["code"] == "timeout"
+      assert error["message"] == "Request timed out"
+    end
+
+    test "normalizes unknown error with fallback" do
+      event = %{
+        type: "ai.request.failed",
+        error: ["something", "unexpected"]
+      }
+
+      result = EventSerializer.serialize(event)
+      error = result["error"]
+
+      assert error["code"] == "unknown"
+      assert is_binary(error["message"])
+    end
+
+    test "does not normalize error field on non-failed events" do
+      event = %{
+        type: "ai.tool.result",
+        error: {:await_crash, :noproc}
+      }
+
+      result = EventSerializer.serialize(event)
+      # Generic tuple conversion: should become a list, not structured error
+      assert result["error"] == ["await_crash", "noproc"]
+    end
+
     test "handles full event envelope" do
       event = %{
         type: "ai.llm.delta",

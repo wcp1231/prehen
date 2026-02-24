@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { Message } from "../stores/sessionStore";
+import ErrorBanner from "./ErrorBanner";
 import ThinkingBlock from "./ThinkingBlock";
 import ToolViewer from "./ToolViewer";
 
@@ -45,6 +46,14 @@ export default function ChatView({ messages }: ChatViewProps) {
                 <ToolViewer key={tc.callId} toolCall={tc} />
               ))}
             </div>
+          )}
+
+          {msg.error && (
+            <ErrorBanner
+              code={msg.error.code}
+              message={msg.error.message}
+              details={msg.error.details}
+            />
           )}
         </div>
       ))}

@@ -13,11 +13,23 @@ defmodule PrehenWeb.EventSerializer do
 
   @spec serialize(map()) :: map()
   def serialize(event) when is_map(event) do
+    is_request_failed = match?(%{type: "ai.request.failed"}, event) or
+                        match?(%{"type" => "ai.request.failed"}, event)
+
     event
     |> Enum.reduce(%{}, fn {key, value}, acc ->
-      case convert_value(value) do
+      str_key = convert_key(key)
+
+      converted =
+        if is_request_failed and str_key == "error" do
+          normalize_error(value)
+        else
+          convert_value(value)
+        end
+
+      case converted do
         :drop -> acc
-        converted -> Map.put(acc, convert_key(key), converted)
+        val -> Map.put(acc, str_key, val)
       end
     end)
   end
@@ -53,4 +65,61 @@ defmodule PrehenWeb.EventSerializer do
     do: value |> Tuple.to_list() |> convert_value()
 
   defp convert_value(value), do: value
+
+  # -- Error normalization for ai.request.failed events --
+
+  defp normalize_error(%{code: code} = map) when is_atom(code) or is_binary(code) do
+    reason = map[:reason]
+    message = if is_binary(reason), do: reason, else: inspect(reason)
+
+    details =
+      map
+      |> Map.drop([:code, :reason])
+      |> case do
+        empty when map_size(empty) == 0 -> nil
+        rest -> serialize(rest)
+      end
+
+    result = %{"code" => to_string(code), "message" => message}
+    if details, do: Map.put(result, "details", details), else: result
+  end
+
+  defp normalize_error({:model_fallback_exhausted, %{} = info}) do
+    message =
+      case info[:model_error] do
+        %{reason: r} when is_binary(r) -> r
+        other when not is_nil(other) -> inspect(other)
+        _ -> "All model fallbacks exhausted"
+      end
+
+    %{
+      "code" => "model_fallback_exhausted",
+      "message" => message,
+      "details" => serialize(info)
+    }
+  end
+
+  defp normalize_error({:await_crash, reason}) do
+    %{
+      "code" => "await_crash",
+      "message" => "Session process crashed",
+      "details" => %{"reason" => inspect(reason)}
+    }
+  end
+
+  defp normalize_error({:cancelled, :steering}) do
+    %{"code" => "cancelled", "message" => "Request cancelled by user"}
+  end
+
+  defp normalize_error(:timeout) do
+    %{"code" => "timeout", "message" => "Request timed out"}
+  end
+
+  defp normalize_error(value) when is_atom(value) do
+    %{"code" => to_string(value), "message" => to_string(value)}
+  end
+
+  defp normalize_error(value) do
+    %{"code" => "unknown", "message" => inspect(value)}
+  end
 end
