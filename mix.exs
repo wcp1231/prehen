@@ -7,7 +7,6 @@ defmodule Prehen.MixProject do
       version: "0.1.0",
       elixir: "~> 1.19",
       start_permanent: Mix.env() == :prod,
-      escript: [main_module: Prehen.CLI],
       deps: deps()
     ]
   end
@@ -28,7 +27,13 @@ defmodule Prehen.MixProject do
       {:jido_ai, github: "agentjido/jido_ai", branch: "main", depth: 1},
       {:req_llm, github: "agentjido/req_llm", branch: "main", override: true, depth: 1},
       {:jason, "~> 1.4"},
-      {:yaml_elixir, "~> 2.12"}
+      {:yaml_elixir, "~> 2.12"},
+
+      # Phoenix
+      {:phoenix, "~> 1.8"},
+      {:phoenix_pubsub, "~> 2.2"},
+      {:bandit, "~> 1.0"},
+      {:cors_plug, "~> 3.0"}
     ]
   end
 end

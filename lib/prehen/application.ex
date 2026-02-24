@@ -19,6 +19,7 @@ defmodule Prehen.Application do
   @impl true
   def start(_type, _args) do
     children = [
+      {Phoenix.PubSub, name: Prehen.PubSub},
       {Prehen.Agent.JidoRuntimeStarter, []},
       {Prehen.Agent.Supervisor, []},
       {Prehen.Tools.PackRegistry, []},
@@ -26,7 +27,8 @@ defmodule Prehen.Application do
       {Prehen.Workspace.SessionManager, []},
       {Prehen.Memory.Supervisor, []},
       {Prehen.Conversation.Store, []},
-      {Prehen.Events.ProjectionSupervisor, []}
+      {Prehen.Events.ProjectionSupervisor, []},
+      PrehenWeb.Endpoint
     ]
 
     opts = [strategy: :one_for_one, name: Prehen.Supervisor]
