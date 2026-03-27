@@ -106,6 +106,11 @@ defmodule Prehen.Gateway.InboxProjectionTest do
 
   alias Prehen.Gateway.InboxProjection
 
+  setup do
+    InboxProjection.reset()
+    :ok
+  end
+
   test "tracks session row, preview, and retained history" do
     assert :ok =
              InboxProjection.session_started(%{
@@ -286,6 +291,7 @@ defmodule Prehen.Gateway.InboxProjection do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
+  def reset, do: GenServer.call(__MODULE__, :reset)
   def session_started(attrs), do: GenServer.call(__MODULE__, {:session_started, attrs})
   def fetch_session(session_id), do: GenServer.call(__MODULE__, {:fetch_session, session_id})
   def fetch_history(session_id), do: GenServer.call(__MODULE__, {:fetch_history, session_id})
@@ -485,6 +491,8 @@ git commit -m "feat: project inbox session history"
 **Files:**
 - Create: `lib/prehen_web/controllers/inbox_controller.ex`
 - Modify: `lib/prehen_web/router.ex`
+- Modify: `lib/prehen/gateway/inbox.ex`
+- Modify: `lib/prehen/client/surface.ex`
 - Modify: `lib/prehen_web/controllers/agent_controller.ex`
 - Modify: `test/prehen/integration/web_inbox_test.exs`
 
@@ -596,6 +604,8 @@ Examples to preserve:
 - stop a live session through the existing gateway stop path
 - return `:ok` when the session is already terminal but still retained in the inbox projection
 - return not found only when the inbox has no retained row for that session id
+
+Put that behavior in `lib/prehen/gateway/inbox.ex` first, and only fall through to `Surface.stop_session/1` when the selected session is still live.
 
 - [ ] **Step 7: Run the HTTP integration tests**
 
@@ -757,6 +767,13 @@ When the selected session becomes terminal or submit returns an error:
 - append a visible system/error note into the timeline
 - disable the composer until the user switches to a live session
 
+When the user selects an already-terminal retained session:
+
+- fetch detail and history over HTTP
+- do not require an active Channel join for the detail pane to render
+- treat missing live worker as expected terminal read-only state, not as a disconnected error
+- keep the composer disabled until the user selects or creates a live session
+
 When session creation fails:
 
 - keep the currently selected session unchanged
@@ -809,6 +826,10 @@ test "web inbox flow can create over HTTP and submit over SessionChannel" do
 
   conn = delete(build_conn(), "/inbox/sessions/#{session_id}")
   assert response(conn, 204)
+
+  conn = get(build_conn(), "/inbox/sessions/#{session_id}")
+  assert %{"session" => %{"session_id" => ^session_id, "status" => "stopped"}} =
+           json_response(conn, 200)
 
   conn = get(build_conn(), "/inbox/sessions/#{session_id}/history")
   assert %{"history" => history} = json_response(conn, 200)
