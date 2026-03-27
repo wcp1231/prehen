@@ -114,4 +114,34 @@ defmodule PrehenWeb.SessionChannelTest do
       "session_id" => "gw_down"
     }
   end
+
+  test "returns a submit ack payload the inbox browser can correlate" do
+    fake_profile = %Prehen.Agents.Profile{
+      name: "fake_stdio",
+      command: ["mix", "run", "--no-start", "test/support/fake_stdio_agent.exs"]
+    }
+
+    registry_pid = Process.whereis(Prehen.Agents.Registry)
+    original = :sys.get_state(registry_pid)
+
+    :sys.replace_state(registry_pid, fn _ ->
+      %{ordered: [fake_profile], by_name: %{"fake_stdio" => fake_profile}}
+    end)
+
+    on_exit(fn ->
+      :sys.replace_state(registry_pid, fn _ -> original end)
+    end)
+
+    assert {:ok, %{session_id: session_id}} =
+             Prehen.Client.Surface.create_session(agent: "fake_stdio")
+
+    on_exit(fn -> Prehen.Client.Surface.stop_session(session_id) end)
+
+    {:ok, _, socket} =
+      socket(PrehenWeb.UserSocket)
+      |> subscribe_and_join(PrehenWeb.SessionChannel, "session:#{session_id}")
+
+    ref = push(socket, "submit", %{"text" => "hello"})
+    assert_reply ref, :ok, %{"request_id" => _request_id, "session_id" => ^session_id}
+  end
 end
