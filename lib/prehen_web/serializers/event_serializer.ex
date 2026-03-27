@@ -21,10 +21,15 @@ defmodule PrehenWeb.EventSerializer do
       str_key = convert_key(key)
 
       converted =
-        if is_request_failed and str_key == "error" do
-          normalize_error(value)
-        else
-          convert_value(value)
+        cond do
+          runtime_specific_field?(str_key) ->
+            :drop
+
+          is_request_failed and str_key == "error" ->
+            normalize_error(value)
+
+          true ->
+            convert_value(value)
         end
 
       case converted do
@@ -122,4 +127,8 @@ defmodule PrehenWeb.EventSerializer do
   defp normalize_error(value) do
     %{"code" => "unknown", "message" => inspect(value)}
   end
+
+  defp runtime_specific_field?("node"), do: true
+  defp runtime_specific_field?("timestamp"), do: true
+  defp runtime_specific_field?(_), do: false
 end

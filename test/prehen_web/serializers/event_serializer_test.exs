@@ -219,5 +219,22 @@ defmodule PrehenWeb.EventSerializerTest do
       assert result["session_id"] == "session_42"
       assert result["at_ms"] == 1_708_915_200_000
     end
+
+    test "serializes the gateway envelope without runtime-specific fields" do
+      event =
+        Prehen.Agents.Envelope.build("session.output.delta", %{
+          gateway_session_id: "gw_1",
+          agent_session_id: "agent_gw_1",
+          agent: "fake_stdio",
+          seq: 1,
+          payload: %{"text" => "hel"}
+        })
+
+      result = EventSerializer.serialize(event)
+
+      assert %{"type" => "session.output.delta", "gateway_session_id" => "gw_1"} = result
+      refute Map.has_key?(result, "node")
+      refute Map.has_key?(result, "timestamp")
+    end
   end
 end
