@@ -10,28 +10,43 @@ defmodule FakeStdioAgent do
       nil ->
         :ok
 
+      :eof ->
+        :ok
+
       line ->
         case Jason.decode(String.trim(line)) do
-          {:ok, %{"type" => "session.open", "gateway_session_id" => gateway_session_id}} ->
+          {:ok,
+           %{
+             "type" => "session.open",
+             "payload" => %{"gateway_session_id" => gateway_session_id}
+           }} ->
+            if emit_stderr?() do
+              IO.puts(:stderr, "fake agent diagnostic")
+            end
+
             IO.puts(
               Jason.encode!(%{
                 type: "session.opened",
-                agent_session_id: "agent_#{gateway_session_id}",
                 payload: %{
-                  ready: true
+                  ready: true,
+                  agent_session_id: "agent_#{gateway_session_id}"
                 }
               })
             )
 
             loop()
 
-          {:ok, %{"type" => "session.message", "agent_session_id" => agent_session_id} = frame} ->
+          {:ok,
+           %{
+             "type" => "session.message",
+             "payload" => %{"agent_session_id" => agent_session_id} = payload
+           }} ->
             IO.puts(
               Jason.encode!(%{
                 type: "session.output.delta",
-                agent_session_id: agent_session_id,
                 payload: %{
-                  message: frame["message_id"] || "message_1",
+                  agent_session_id: agent_session_id,
+                  message_id: payload["message_id"] || "message_1",
                   text: "hi"
                 }
               })
@@ -39,13 +54,17 @@ defmodule FakeStdioAgent do
 
             loop()
 
-          {:ok, %{"type" => "session.control"}} ->
+          {:ok, %{"type" => "session.control", "payload" => _payload}} ->
             loop()
 
           _ ->
             loop()
         end
     end
+  end
+
+  defp emit_stderr? do
+    System.get_env("FAKE_STDIO_EMIT_STDERR") in ["1", "true"]
   end
 end
 
