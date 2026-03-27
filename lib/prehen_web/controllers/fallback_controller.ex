@@ -23,13 +23,6 @@ defmodule PrehenWeb.FallbackController do
     |> render("404.json")
   end
 
-  def call(conn, {:error, :bad_request}) do
-    conn
-    |> put_status(:bad_request)
-    |> put_view(json: PrehenWeb.ErrorJSON)
-    |> render("400.json")
-  end
-
   def call(conn, {:error, reason}) do
     conn
     |> put_status(:unprocessable_entity)

@@ -28,11 +28,19 @@ defmodule PrehenWeb.SessionController do
   def create_message(conn, %{"id" => session_id} = params) do
     text = Map.get(params, "text") || Map.get(params, "message")
 
-    with {:ok, normalized_text} <- normalize_message_text(text),
-         {:ok, submit} <- Surface.submit_message(session_id, normalized_text, kind: :prompt) do
-      conn
-      |> put_status(:accepted)
-      |> json(submit)
+    case normalize_message_text(text) do
+      {:ok, normalized_text} ->
+        with {:ok, submit} <- Surface.submit_message(session_id, normalized_text, kind: :prompt) do
+          conn
+          |> put_status(:accepted)
+          |> json(submit)
+        end
+
+      {:error, :bad_request} ->
+        conn
+        |> put_status(:bad_request)
+        |> put_view(json: PrehenWeb.ErrorJSON)
+        |> render("400.json")
     end
   end
 
