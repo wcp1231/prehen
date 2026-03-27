@@ -31,6 +31,9 @@ defmodule Prehen.Gateway.InboxProjectionTest do
              })
 
     assert {:ok, row} = InboxProjection.fetch_session("gw_inbox_1")
+    assert row.session_id == "gw_inbox_1"
+    assert row.agent_name == "fake_stdio"
+    assert row.created_at == 1_774_625_000_000
     assert row.preview == "hi"
 
     assert {:ok, history} = InboxProjection.fetch_history("gw_inbox_1")

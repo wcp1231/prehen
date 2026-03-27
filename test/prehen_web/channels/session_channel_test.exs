@@ -45,6 +45,8 @@ defmodule PrehenWeb.SessionChannelTest do
         status: :attached
       })
 
+    on_exit(fn -> SessionRegistry.delete("gw_1") end)
+
     {:ok, _, _socket} =
       socket(PrehenWeb.UserSocket)
       |> subscribe_and_join(PrehenWeb.SessionChannel, "session:gw_1")
@@ -86,6 +88,8 @@ defmodule PrehenWeb.SessionChannelTest do
         status: :attached
       })
 
+    on_exit(fn -> SessionRegistry.delete("gw_dead") end)
+
     assert {:error, %{"reason" => "session_not_found"}} =
              socket(PrehenWeb.UserSocket)
              |> subscribe_and_join(PrehenWeb.SessionChannel, "session:gw_dead")
@@ -102,6 +106,8 @@ defmodule PrehenWeb.SessionChannelTest do
         agent_session_id: "agent_gw_down",
         status: :attached
       })
+
+    on_exit(fn -> SessionRegistry.delete("gw_down") end)
 
     {:ok, _, _socket} =
       socket(PrehenWeb.UserSocket)
