@@ -17,19 +17,26 @@ defmodule Prehen.Integration.WebInboxTest do
   end
 
   test "lists agents for the inbox page" do
+    fake_profile = %Prehen.Agents.Profile{
+      name: "fake_stdio",
+      command: ["mix", "run", "--no-start", "test/support/fake_stdio_agent.exs"]
+    }
+
+    registry_pid = Process.whereis(Prehen.Agents.Registry)
+    original = :sys.get_state(registry_pid)
+
+    :sys.replace_state(registry_pid, fn _ ->
+      %{ordered: [fake_profile], by_name: %{"fake_stdio" => fake_profile}}
+    end)
+
+    on_exit(fn ->
+      :sys.replace_state(registry_pid, fn _ -> original end)
+    end)
+
     conn = get(build_conn(), "/agents")
 
     assert %{"agents" => agents} = json_response(conn, 200)
-    assert is_list(agents)
-
-    case agents do
-      [] ->
-        :ok
-
-      [first | _] ->
-        assert Map.has_key?(first, "agent")
-        assert Map.has_key?(first, "name")
-    end
+    assert [%{"agent" => "fake_stdio", "name" => "fake_stdio"}] = agents
   end
 
   defp maybe_reset_inbox_projection do

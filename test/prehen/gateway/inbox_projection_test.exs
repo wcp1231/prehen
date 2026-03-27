@@ -37,7 +37,20 @@ defmodule Prehen.Gateway.InboxProjectionTest do
     assert row.preview == "hi"
 
     assert {:ok, history} = InboxProjection.fetch_history("gw_inbox_1")
-    assert Enum.map(history, & &1.kind) == [:user_message, :assistant_message]
+    assert [
+             %{
+               kind: :user_message,
+               session_id: "gw_inbox_1",
+               message_id: "request_1",
+               text: "hello"
+             },
+             %{
+               kind: :assistant_message,
+               session_id: "gw_inbox_1",
+               message_id: "request_1",
+               text: "hi"
+             }
+           ] = history
   end
 
   test "merges multiple deltas for one assistant message" do
