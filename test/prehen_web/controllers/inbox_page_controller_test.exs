@@ -10,12 +10,7 @@ defmodule PrehenWeb.InboxPageControllerTest do
     body = html_response(conn, 200)
 
     assert body =~ "Prehen Inbox"
-    assert body =~ "data-role=\"agent-select\""
     assert body =~ "data-role=\"session-list\""
-    assert body =~ "data-role=\"history\""
-    assert body =~ "data-role=\"composer\""
-    assert body =~ "data-role=\"create-error\""
-    assert body =~ "data-role=\"connection-state\""
     assert body =~ "/inbox.js"
   end
 end

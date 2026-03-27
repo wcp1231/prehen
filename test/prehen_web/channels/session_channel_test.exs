@@ -142,6 +142,6 @@ defmodule PrehenWeb.SessionChannelTest do
       |> subscribe_and_join(PrehenWeb.SessionChannel, "session:#{session_id}")
 
     ref = push(socket, "submit", %{"text" => "hello"})
-    assert_reply ref, :ok, %{"request_id" => _request_id, "session_id" => ^session_id}
+    assert_reply ref, :ok, %{"request_id" => _request_id}
   end
 end

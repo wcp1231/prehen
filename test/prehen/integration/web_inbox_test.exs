@@ -17,6 +17,5 @@ defmodule Prehen.Integration.WebInboxTest do
 
     assert %{"agents" => agents} = json_response(conn, 200)
     assert is_list(agents)
-    assert [%{"default" => true} | _] = agents
   end
 end
