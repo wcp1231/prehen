@@ -17,6 +17,12 @@ defmodule Prehen.Observability.TraceCollector do
     :exit, _reason -> :ok
   end
 
+  def record_sync(event) when is_map(event) do
+    GenServer.call(__MODULE__, {:record_sync, normalize(event)})
+  catch
+    :exit, _reason -> :ok
+  end
+
   def for_session(session_id) when is_binary(session_id) do
     GenServer.call(__MODULE__, {:for_session, session_id})
   catch
@@ -42,6 +48,20 @@ defmodule Prehen.Observability.TraceCollector do
   @impl true
   def handle_call({:for_session, session_id}, _from, state) do
     {:reply, {:ok, Map.get(state, session_id, [])}, state}
+  end
+
+  def handle_call({:record_sync, %{session_id: session_id} = event}, _from, state) do
+    events =
+      state
+      |> Map.get(session_id, [])
+      |> Kernel.++([event])
+      |> trim()
+
+    {:reply, :ok, Map.put(state, session_id, events)}
+  end
+
+  def handle_call({:record_sync, _event}, _from, state) do
+    {:reply, :ok, state}
   end
 
   defp normalize(%{type: type} = event) when is_binary(type) do

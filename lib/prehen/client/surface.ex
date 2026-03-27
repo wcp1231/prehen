@@ -14,7 +14,7 @@ defmodule Prehen.Client.Surface do
   - `run/2` keeps CLI compatibility while reusing the unified session APIs.
   """
 
-  alias Prehen.Agent.Runtime
+  alias Prehen.Agent.EventBridge
   alias Prehen.Config
   alias Prehen.Events
   alias Prehen.Gateway.Router
@@ -46,17 +46,7 @@ defmodule Prehen.Client.Surface do
   """
   @spec resume_session(String.t(), keyword()) :: {:ok, map()} | {:error, map()}
   def resume_session(session_id, opts \\ []) when is_binary(session_id) and is_list(opts) do
-    with {:ok, session_pid} <- Runtime.resume_session(session_id, opts),
-         {:ok, status} <- Runtime.session_status(session_pid) do
-      {:ok,
-       %{
-         session_pid: session_pid,
-         session_id: status.session_id
-       }}
-    else
-      {:error, reason} ->
-        {:error, error_payload(:session_resume_failed, reason)}
-    end
+    unsupported_api(:resume_session, %{session_id: session_id, opts: opts})
   end
 
   @doc """
@@ -113,21 +103,7 @@ defmodule Prehen.Client.Surface do
 
   @spec await_result(pid(), keyword()) :: {:ok, map()} | {:error, map()}
   def await_result(session_pid, opts \\ []) when is_pid(session_pid) and is_list(opts) do
-    timeout = Keyword.get(opts, :timeout, 60_000)
-
-    result =
-      try do
-        Runtime.await_idle(session_pid, timeout: timeout)
-      catch
-        :exit, {:timeout, _details} -> {:error, :timeout}
-        :exit, {:noproc, _details} -> {:error, :session_unavailable}
-      end
-
-    case result do
-      {:ok, payload} -> {:ok, payload}
-      {:error, :timeout} -> {:error, error_payload(:timeout, :timeout)}
-      {:error, reason} -> {:error, error_payload(:await_failed, reason)}
-    end
+    unsupported_api(:await_result, %{session_pid: session_pid, opts: opts})
   end
 
   @spec stop_session(String.t()) :: :ok | {:error, map()}
@@ -159,28 +135,28 @@ defmodule Prehen.Client.Surface do
   列出当前进程绑定 workspace 下的会话。
   List sessions in the currently bound workspace.
   """
-  @spec list_sessions(keyword()) :: [map()]
+  @spec list_sessions(keyword()) :: {:error, map()}
   def list_sessions(opts \\ []) when is_list(opts) do
-    Runtime.list_sessions(opts)
+    unsupported_api(:list_sessions, %{opts: opts})
   end
 
   @doc """
   回放会话历史记录（按 `session_id`）。
   Replay persisted session history by `session_id`.
   """
-  @spec replay_session(String.t(), keyword()) :: [map()]
+  @spec replay_session(String.t(), keyword()) :: {:error, map()}
   def replay_session(session_id, opts \\ [])
       when is_binary(session_id) and is_list(opts) do
-    Runtime.replay_session(session_id, opts)
+    unsupported_api(:replay_session, %{session_id: session_id, opts: opts})
   end
 
   @doc """
   设置当前进程绑定 workspace 的 capability packs（control plane）。
   Set capability packs for the currently bound workspace.
   """
-  @spec set_capability_packs([atom()], keyword()) :: :ok | {:error, term()}
+  @spec set_capability_packs([atom()], keyword()) :: {:error, map()}
   def set_capability_packs(packs, opts \\ []) when is_list(packs) and is_list(opts) do
-    Runtime.set_capability_packs(packs, opts)
+    unsupported_api(:set_capability_packs, %{packs: packs, opts: opts})
   end
 
   @doc """
@@ -192,22 +168,25 @@ defmodule Prehen.Client.Surface do
     config = Config.load(opts)
     timeout = Keyword.get(opts, :timeout_ms, config[:timeout_ms])
     config_error = maybe_ignore_gateway_agent_template_error(config[:config_error])
+    request_id = gen_id("request")
 
     try do
       with nil <- config_error,
            {:ok, session} <- start_or_attach_gateway_session(opts),
-           {:ok, response} <- submit_message(session.session_id, task, request_id: gen_id("request")),
-           {:ok, answer} <- await_gateway_answer(session.session_id, timeout),
+           {:ok, response, matched_event} <-
+             submit_and_await_gateway_answer(session.session_id, task, request_id, timeout),
            {:ok, trace} <- Prehen.Trace.for_session(session.session_id) do
+        trace = ensure_trace_contains_event(trace, matched_event, request_id, session.session_id)
+
         {:ok,
          %{
            status: :ok,
-           answer: answer,
+           answer: extract_event_text(matched_event),
            trace: trace,
            session_id: session.session_id,
-           request_id: response.request_id,
-           queued: response.queued
-         }}
+            request_id: response.request_id,
+            queued: response.queued
+          }}
       else
         config_error when is_map(config_error) ->
           {:error, error_payload(:runtime_failed, config_error)}
@@ -222,6 +201,20 @@ defmodule Prehen.Client.Surface do
 
   defp maybe_ignore_gateway_agent_template_error(%{code: :agent_template_not_found}), do: nil
   defp maybe_ignore_gateway_agent_template_error(other), do: other
+
+  defp submit_and_await_gateway_answer(session_id, task, request_id, timeout_ms) do
+    topic = "session:#{session_id}"
+    :ok = Phoenix.PubSub.subscribe(Prehen.PubSub, topic)
+
+    try do
+      with {:ok, response} <- submit_message(session_id, task, request_id: request_id),
+           {:ok, event} <- await_gateway_answer(request_id, timeout_ms) do
+        {:ok, response, event}
+      end
+    after
+      Phoenix.PubSub.unsubscribe(Prehen.PubSub, topic)
+    end
+  end
 
   defp start_or_attach_gateway_session(opts) do
     case opts |> Keyword.get(:session_id) |> normalize_session_id() do
@@ -239,24 +232,71 @@ defmodule Prehen.Client.Surface do
     end
   end
 
-  defp await_gateway_answer(session_id, timeout_ms) do
-    topic = "session:#{session_id}"
-    :ok = Phoenix.PubSub.subscribe(Prehen.PubSub, topic)
+  defp await_gateway_answer(request_id, timeout_ms) do
+    deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
+    await_gateway_answer(request_id, deadline_ms, timeout_ms)
+  end
 
-    try do
-      receive do
-        {:gateway_event, %{type: "session.output.delta", payload: payload}} ->
-          {:ok, Map.get(payload, "text") || Map.get(payload, :text) || ""}
+  defp await_gateway_answer(request_id, deadline_ms, _timeout_ms) do
+    remaining_ms = max(deadline_ms - System.monotonic_time(:millisecond), 0)
 
-        {:gateway_event, %{"type" => "session.output.delta", "payload" => payload}} ->
-          {:ok, Map.get(payload, "text") || ""}
-      after
-        timeout_ms -> {:error, :timeout}
-      end
+    receive do
+      {:gateway_event, event} ->
+        if matching_output_delta?(event, request_id) do
+          {:ok, event}
+        else
+          await_gateway_answer(request_id, deadline_ms, remaining_ms)
+        end
     after
-      Phoenix.PubSub.unsubscribe(Prehen.PubSub, topic)
+      remaining_ms -> {:error, :timeout}
     end
   end
+
+  defp matching_output_delta?(%{type: "session.output.delta", payload: payload}, request_id)
+       when is_map(payload) do
+    Map.get(payload, :message_id) == request_id || Map.get(payload, "message_id") == request_id
+  end
+
+  defp matching_output_delta?(%{"type" => "session.output.delta", "payload" => payload}, request_id)
+       when is_map(payload) do
+    Map.get(payload, :message_id) == request_id || Map.get(payload, "message_id") == request_id
+  end
+
+  defp matching_output_delta?(_event, _request_id), do: false
+
+  defp ensure_trace_contains_event(trace, event, request_id, session_id) do
+    present? =
+      Enum.any?(trace, fn
+        %{type: "session.output.delta", message_id: ^request_id} -> true
+        %{"type" => "session.output.delta", "message_id" => ^request_id} -> true
+        _ -> false
+      end)
+
+    if present? do
+      trace
+    else
+      payload =
+        event_payload(event)
+        |> Map.put_new(:session_id, session_id)
+        |> Map.put_new(:gateway_session_id, session_id)
+
+      trace ++ [EventBridge.project("session.output.delta", payload, source: "prehen.gateway")]
+    end
+  end
+
+  defp event_payload(%{payload: payload}) when is_map(payload), do: payload
+  defp event_payload(%{"payload" => payload}) when is_map(payload), do: payload
+  defp event_payload(_), do: %{}
+
+  defp extract_event_text(%{payload: payload}) when is_map(payload) do
+    Map.get(payload, :text) || Map.get(payload, "text") || ""
+  end
+
+  defp extract_event_text(%{"payload" => payload}) when is_map(payload) do
+    Map.get(payload, :text) || Map.get(payload, "text") || ""
+  end
+
+  defp extract_event_text(_), do: ""
 
   defp maybe_stop_gateway_session_if_owned(opts) do
     session_id = Process.delete(:prehen_gateway_session_owned)
@@ -288,6 +328,10 @@ defmodule Prehen.Client.Surface do
   end
 
   defp normalize_session_id(session_id), do: to_string(session_id)
+
+  defp unsupported_api(api, detail) do
+    {:error, error_payload(:unsupported_api, Map.merge(%{api: api, mode: :gateway_mvp}, detail))}
+  end
 
   defp error_payload(type, reason) do
     %{

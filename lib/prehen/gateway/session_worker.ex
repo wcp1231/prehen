@@ -66,7 +66,7 @@ defmodule Prehen.Gateway.SessionWorker do
                      status: :attached
                    }) do
                 :ok ->
-                  TraceCollector.record(%{
+                  TraceCollector.record_sync(%{
                     type: "agent.started",
                     session_id: gateway_session_id,
                     gateway_session_id: gateway_session_id,
@@ -148,7 +148,7 @@ defmodule Prehen.Gateway.SessionWorker do
 
   @impl true
   def terminate(_reason, state) do
-    TraceCollector.record(%{
+    TraceCollector.record_sync(%{
       type: "agent.stopped",
       session_id: state.gateway_session_id,
       gateway_session_id: state.gateway_session_id,
@@ -163,7 +163,7 @@ defmodule Prehen.Gateway.SessionWorker do
   end
 
   defp dispatch_event(state, event) do
-    TraceCollector.record(event)
+    TraceCollector.record_sync(event)
 
     if is_pid(state.test_pid) do
       send(state.test_pid, {:gateway_event, event})

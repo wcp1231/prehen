@@ -53,4 +53,18 @@ defmodule PrehenTest do
     assert :ok = Prehen.stop_session(session_id)
     assert {:error, %{type: :session_status_failed}} = Prehen.session_status(session_id)
   end
+
+  test "runtime-era public APIs fail explicitly in gateway MVP mode" do
+    assert {:error, %{type: :unsupported_api, reason: %{api: :resume_session}}} =
+             Prehen.resume_session("session_1")
+
+    assert {:error, %{type: :unsupported_api, reason: %{api: :list_sessions}}} =
+             Prehen.list_sessions()
+
+    assert {:error, %{type: :unsupported_api, reason: %{api: :replay_session}}} =
+             Prehen.replay_session("session_1")
+
+    assert {:error, %{type: :unsupported_api, reason: %{api: :set_capability_packs}}} =
+             Prehen.set_capability_packs([:local_fs])
+  end
 end
