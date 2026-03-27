@@ -66,5 +66,8 @@ defmodule PrehenTest do
 
     assert {:error, %{type: :unsupported_api, reason: %{api: :set_capability_packs}}} =
              Prehen.set_capability_packs([:local_fs])
+
+    assert {:error, %{type: :unsupported_api, reason: %{api: :subscribe_events}}} =
+             Prehen.subscribe_events("session_1")
   end
 end

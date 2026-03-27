@@ -157,6 +157,7 @@ defmodule Prehen.Client.SurfaceTest do
       end)
 
     assert matching
+
     assert (Map.get(matching, :text) || get_in(matching, [:payload, "text"])) ==
              "match:#{result.request_id}"
   end
@@ -176,5 +177,8 @@ defmodule Prehen.Client.SurfaceTest do
 
     assert {:error, %{type: :unsupported_api, reason: %{api: :set_capability_packs}}} =
              Surface.set_capability_packs([:local_fs])
+
+    assert {:error, %{type: :unsupported_api, reason: %{api: :subscribe_events}}} =
+             Surface.subscribe_events("session_1")
   end
 end

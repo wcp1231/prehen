@@ -16,7 +16,6 @@ defmodule Prehen.Client.Surface do
 
   alias Prehen.Agent.EventBridge
   alias Prehen.Config
-  alias Prehen.Events
   alias Prehen.Gateway.Router
   alias Prehen.Gateway.SessionRegistry
   alias Prehen.Gateway.SessionWorker
@@ -41,10 +40,10 @@ defmodule Prehen.Client.Surface do
   end
 
   @doc """
-  恢复历史会话并返回与创建会话一致的最小标识信息。
-  Resume a historical session and return the same minimal identifiers as create.
+  Gateway MVP 不支持恢复旧 runtime 会话。
+  Gateway MVP does not support resuming legacy runtime sessions.
   """
-  @spec resume_session(String.t(), keyword()) :: {:ok, map()} | {:error, map()}
+  @spec resume_session(String.t(), keyword()) :: {:error, map()}
   def resume_session(session_id, opts \\ []) when is_binary(session_id) and is_list(opts) do
     unsupported_api(:resume_session, %{session_id: session_id, opts: opts})
   end
@@ -101,7 +100,11 @@ defmodule Prehen.Client.Surface do
     end
   end
 
-  @spec await_result(pid(), keyword()) :: {:ok, map()} | {:error, map()}
+  @doc """
+  Gateway MVP 不暴露旧 runtime 的 await_result 语义。
+  Gateway MVP does not expose the legacy runtime await_result flow.
+  """
+  @spec await_result(pid(), keyword()) :: {:error, map()}
   def await_result(session_pid, opts \\ []) when is_pid(session_pid) and is_list(opts) do
     unsupported_api(:await_result, %{session_pid: session_pid, opts: opts})
   end
@@ -109,31 +112,30 @@ defmodule Prehen.Client.Surface do
   @spec stop_session(String.t()) :: :ok | {:error, map()}
   def stop_session(session_id) when is_binary(session_id) do
     with {:ok, worker_pid} <- SessionRegistry.fetch_worker(session_id),
-         :ok <- DynamicSupervisor.terminate_child(Prehen.Gateway.SessionWorkerSupervisor, worker_pid) do
+         :ok <-
+           DynamicSupervisor.terminate_child(Prehen.Gateway.SessionWorkerSupervisor, worker_pid) do
       :ok
     else
       {:error, :not_found} ->
         {:error, error_payload(:session_stop_failed, :not_found)}
 
-      {:error, reason} -> {:error, error_payload(:session_stop_failed, reason)}
+      {:error, reason} ->
+        {:error, error_payload(:session_stop_failed, reason)}
     end
   end
 
   @doc """
-  订阅指定会话事件流（当前进程将收到 `{:session_event, event}`）。
-  Subscribe to a session event stream; current process receives `{:session_event, event}`.
+  Gateway MVP 不再暴露旧 projection-based 事件订阅接口。
+  Gateway MVP no longer exposes the legacy projection-based event subscription API.
   """
-  @spec subscribe_events(String.t()) :: {:ok, map()} | {:error, map()}
+  @spec subscribe_events(String.t()) :: {:error, map()}
   def subscribe_events(session_id) when is_binary(session_id) do
-    case Events.subscribe(session_id) do
-      {:ok, payload} -> {:ok, payload}
-      {:error, reason} -> {:error, error_payload(:event_subscribe_failed, reason)}
-    end
+    unsupported_api(:subscribe_events, %{session_id: session_id})
   end
 
   @doc """
-  列出当前进程绑定 workspace 下的会话。
-  List sessions in the currently bound workspace.
+  Gateway MVP 不支持列出旧 runtime/workspace 会话。
+  Gateway MVP does not support listing legacy runtime/workspace sessions.
   """
   @spec list_sessions(keyword()) :: {:error, map()}
   def list_sessions(opts \\ []) when is_list(opts) do
@@ -141,8 +143,8 @@ defmodule Prehen.Client.Surface do
   end
 
   @doc """
-  回放会话历史记录（按 `session_id`）。
-  Replay persisted session history by `session_id`.
+  Gateway MVP 不支持回放旧 conversation store 历史。
+  Gateway MVP does not support replaying legacy conversation-store history.
   """
   @spec replay_session(String.t(), keyword()) :: {:error, map()}
   def replay_session(session_id, opts \\ [])
@@ -151,8 +153,8 @@ defmodule Prehen.Client.Surface do
   end
 
   @doc """
-  设置当前进程绑定 workspace 的 capability packs（control plane）。
-  Set capability packs for the currently bound workspace.
+  Gateway MVP 不支持旧 runtime capability pack 控制面。
+  Gateway MVP does not support the legacy runtime capability-pack control plane.
   """
   @spec set_capability_packs([atom()], keyword()) :: {:error, map()}
   def set_capability_packs(packs, opts \\ []) when is_list(packs) and is_list(opts) do
@@ -184,9 +186,9 @@ defmodule Prehen.Client.Surface do
            answer: extract_event_text(matched_event),
            trace: trace,
            session_id: session.session_id,
-            request_id: response.request_id,
-            queued: response.queued
-          }}
+           request_id: response.request_id,
+           queued: response.queued
+         }}
       else
         config_error when is_map(config_error) ->
           {:error, error_payload(:runtime_failed, config_error)}
@@ -257,7 +259,10 @@ defmodule Prehen.Client.Surface do
     Map.get(payload, :message_id) == request_id || Map.get(payload, "message_id") == request_id
   end
 
-  defp matching_output_delta?(%{"type" => "session.output.delta", "payload" => payload}, request_id)
+  defp matching_output_delta?(
+         %{"type" => "session.output.delta", "payload" => payload},
+         request_id
+       )
        when is_map(payload) do
     Map.get(payload, :message_id) == request_id || Map.get(payload, "message_id") == request_id
   end

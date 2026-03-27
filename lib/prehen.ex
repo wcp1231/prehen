@@ -23,7 +23,7 @@ defmodule Prehen do
     Surface.create_session(opts)
   end
 
-  @spec resume_session(String.t(), keyword()) :: {:ok, map()} | {:error, map()}
+  @spec resume_session(String.t(), keyword()) :: {:error, map()}
   def resume_session(session_id, opts \\ []) when is_binary(session_id) and is_list(opts) do
     Surface.resume_session(session_id, opts)
   end
@@ -39,12 +39,12 @@ defmodule Prehen do
     Surface.stop_session(session_id)
   end
 
-  @spec await_result(pid(), keyword()) :: {:ok, map()} | {:error, map()}
+  @spec await_result(pid(), keyword()) :: {:error, map()}
   def await_result(session_pid, opts \\ []) when is_pid(session_pid) and is_list(opts) do
     Surface.await_result(session_pid, opts)
   end
 
-  @spec list_sessions(keyword()) :: [map()]
+  @spec list_sessions(keyword()) :: {:error, map()}
   def list_sessions(opts \\ []) do
     Surface.list_sessions(opts)
   end
@@ -54,17 +54,17 @@ defmodule Prehen do
     Surface.session_status(session_id)
   end
 
-  @spec replay_session(String.t(), keyword()) :: [map()]
+  @spec replay_session(String.t(), keyword()) :: {:error, map()}
   def replay_session(session_id, opts \\ []) when is_binary(session_id) and is_list(opts) do
     Surface.replay_session(session_id, opts)
   end
 
-  @spec set_capability_packs([atom()], keyword()) :: :ok | {:error, term()}
+  @spec set_capability_packs([atom()], keyword()) :: {:error, map()}
   def set_capability_packs(packs, opts \\ []) when is_list(packs) and is_list(opts) do
     Surface.set_capability_packs(packs, opts)
   end
 
-  @spec subscribe_events(String.t()) :: {:ok, map()} | {:error, map()}
+  @spec subscribe_events(String.t()) :: {:error, map()}
   def subscribe_events(session_id) when is_binary(session_id) do
     Surface.subscribe_events(session_id)
   end
