@@ -467,6 +467,12 @@ test "creates, reads, and stops inbox sessions" do
   conn = delete(build_conn(), "/inbox/sessions/#{session_id}")
   assert response(conn, 204)
 end
+
+test "returns a structured error when session creation fails" do
+  conn = post(build_conn(), "/inbox/sessions", %{"agent" => "missing_agent"})
+
+  assert %{"error" => %{"type" => "unprocessable_entity"}} = json_response(conn, 422)
+end
 ```
 
 - [ ] **Step 2: Run the inbox HTTP tests to verify they fail**
@@ -518,13 +524,23 @@ test "GET /agents marks one default agent when profiles exist" do
 end
 ```
 
-- [ ] **Step 5: Run the HTTP integration tests**
+- [ ] **Step 5: Implement explicit create-failure behavior for the inbox API**
+
+Creation failures must return a stable error payload through the fallback controller so the browser can render the error without changing the current selection.
+
+Examples to preserve:
+
+- missing/unknown agent
+- worker spawn failure
+- transport handshake failure
+
+- [ ] **Step 6: Run the HTTP integration tests**
 
 Run: `mix test test/prehen/integration/web_inbox_test.exs test/prehen/integration/platform_runtime_test.exs`
 
 Expected: PASS
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add lib/prehen_web/controllers/inbox_controller.ex lib/prehen_web/controllers/agent_controller.ex lib/prehen_web/router.ex test/prehen/integration/web_inbox_test.exs
@@ -616,6 +632,8 @@ assert body =~ "data-role=\"agent-select\""
 assert body =~ "data-role=\"session-list\""
 assert body =~ "data-role=\"history\""
 assert body =~ "data-role=\"composer\""
+assert body =~ "data-role=\"create-error\""
+assert body =~ "data-role=\"connection-state\""
 ```
 
 - [ ] **Step 2: Run the page shell test to verify it fails**
@@ -656,6 +674,7 @@ The first `inbox.js` should do only this:
 await loadAgentsAndSessions()
 renderSessionList()
 createSession()
+renderCreateError(error)
 selectSession(sessionId)
 attachChannel(sessionId)
 submitMessage(sessionId, text)
@@ -663,6 +682,8 @@ applyGatewayEvent(event)
 setComposerDisabled(disabled)
 appendSystemNote(sessionId, text)
 renderSelectedSessionStatus(status)
+setConnectionState(state)
+scheduleReattach(sessionId)
 ```
 
 Do not add a build step or framework.
@@ -672,6 +693,19 @@ When the selected session becomes terminal or submit returns an error:
 - keep the session selected
 - append a visible system/error note into the timeline
 - disable the composer until the user switches to a live session
+
+When session creation fails:
+
+- keep the currently selected session unchanged
+- render the create error in the dedicated create-error area
+- do not clear the session list or current history pane
+
+When the socket disconnects or closes:
+
+- render a disconnected connection-state indicator
+- keep the selected session and current history visible
+- attempt to reattach the active session channel after reconnect
+- clear the disconnected indicator after successful reattach
 
 - [ ] **Step 5: Run the page and integration tests**
 
