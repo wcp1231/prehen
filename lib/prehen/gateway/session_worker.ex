@@ -18,38 +18,54 @@ defmodule Prehen.Gateway.SessionWorker do
 
   @impl true
   def init(opts) do
+    Process.flag(:trap_exit, true)
+
     gateway_session_id = Keyword.fetch!(opts, :gateway_session_id)
     requested_agent_name = Keyword.get(opts, :agent_name)
     test_pid = Keyword.get(opts, :test_pid)
     workspace = Keyword.get(opts, :workspace)
 
     with {:ok, profile} <- Router.route(agent_name: requested_agent_name),
-         {:ok, transport_module} <- transport_module(profile),
-         {:ok, transport} <-
-           transport_module.start_link(profile: profile, gateway_session_id: gateway_session_id),
-         {:ok, %{agent_session_id: agent_session_id}} <-
-           transport_module.open_session(transport, %{workspace: workspace}),
-         :ok <-
-           SessionRegistry.put(%{
-             gateway_session_id: gateway_session_id,
-             agent_name: profile.name,
-             agent_session_id: agent_session_id,
-             status: :attached
-           }) do
-      owner = self()
-      receiver = spawn_link(fn -> recv_loop(owner, transport_module, transport) end)
+         {:ok, transport_module} <- transport_module(profile) do
+      case transport_module.start_link(profile: profile, gateway_session_id: gateway_session_id) do
+        {:ok, transport} ->
+          case transport_module.open_session(transport, %{workspace: workspace}) do
+            {:ok, %{agent_session_id: agent_session_id}} ->
+              case SessionRegistry.put(%{
+                     gateway_session_id: gateway_session_id,
+                     agent_name: profile.name,
+                     agent_session_id: agent_session_id,
+                     status: :attached
+                   }) do
+                :ok ->
+                  owner = self()
+                  receiver = spawn_link(fn -> recv_loop(owner, transport_module, transport) end)
 
-      {:ok,
-       %{
-         gateway_session_id: gateway_session_id,
-         agent_name: profile.name,
-         agent_session_id: agent_session_id,
-         transport_module: transport_module,
-         transport: transport,
-         receiver: receiver,
-         test_pid: test_pid,
-         seq: 0
-       }}
+                  {:ok,
+                   %{
+                     gateway_session_id: gateway_session_id,
+                     agent_name: profile.name,
+                     agent_session_id: agent_session_id,
+                     transport_module: transport_module,
+                     transport: transport,
+                     receiver: receiver,
+                     test_pid: test_pid,
+                     seq: 0
+                   }}
+
+                {:error, reason} ->
+                  safe_stop_transport(transport_module, transport)
+                  {:stop, reason}
+              end
+
+            {:error, reason} ->
+              safe_stop_transport(transport_module, transport)
+              {:stop, reason}
+          end
+
+        {:error, reason} ->
+          {:stop, reason}
+      end
     else
       {:error, reason} -> {:stop, reason}
     end
@@ -88,13 +104,16 @@ defmodule Prehen.Gateway.SessionWorker do
     {:stop, :normal, state}
   end
 
+  def handle_info({:EXIT, transport, _reason}, %{transport: transport} = state) do
+    {:stop, :normal, state}
+  end
+
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl true
   def terminate(_reason, state) do
-    if is_pid(state.transport) do
-      state.transport_module.stop(state.transport)
-    end
+    safe_stop_transport(state.transport_module, state.transport)
+    safe_delete_registry_route(state.gateway_session_id)
 
     :ok
   end
@@ -128,6 +147,31 @@ defmodule Prehen.Gateway.SessionWorker do
   defp transport_module(%Profile{transport: :stdio}), do: {:ok, Prehen.Agents.Transports.Stdio}
   defp transport_module(%Profile{transport: module}) when is_atom(module), do: {:ok, module}
   defp transport_module(_profile), do: {:error, :unsupported_transport}
+
+  defp safe_stop_transport(transport_module, transport)
+       when is_atom(transport_module) and is_pid(transport) do
+    try do
+      transport_module.stop(transport)
+      :ok
+    rescue
+      _error -> :ok
+    catch
+      :exit, _reason -> :ok
+    end
+  end
+
+  defp safe_stop_transport(_transport_module, _transport), do: :ok
+
+  defp safe_delete_registry_route(gateway_session_id) when is_binary(gateway_session_id) do
+    try do
+      SessionRegistry.delete(gateway_session_id)
+      :ok
+    rescue
+      _error -> :ok
+    catch
+      :exit, _reason -> :ok
+    end
+  end
 
   defp frame_value(map, key) when is_binary(key) do
     atom_key =

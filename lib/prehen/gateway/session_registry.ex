@@ -15,6 +15,10 @@ defmodule Prehen.Gateway.SessionRegistry do
     GenServer.call(__MODULE__, {:fetch, gateway_session_id})
   end
 
+  def delete(gateway_session_id) when is_binary(gateway_session_id) do
+    GenServer.call(__MODULE__, {:delete, gateway_session_id})
+  end
+
   @impl true
   def init(_opts) do
     {:ok, %{}}
@@ -32,5 +36,9 @@ defmodule Prehen.Gateway.SessionRegistry do
       {:ok, session} -> {:reply, {:ok, session}, state}
       :error -> {:reply, {:error, :not_found}, state}
     end
+  end
+
+  def handle_call({:delete, gateway_session_id}, _from, state) do
+    {:reply, :ok, Map.delete(state, gateway_session_id)}
   end
 end

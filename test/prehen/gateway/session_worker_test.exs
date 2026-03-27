@@ -6,7 +6,28 @@ defmodule Prehen.Gateway.SessionWorkerTest do
   alias Prehen.Gateway.SessionRegistry
   alias Prehen.Gateway.SessionWorker
 
+  defmodule BrokenOpenTransport do
+    def start_link(opts) do
+      profile = Keyword.fetch!(opts, :profile)
+      test_pid = profile.metadata.test_pid
+      pid = spawn(fn -> Process.sleep(:infinity) end)
+      send(test_pid, {:broken_transport_started, pid})
+      {:ok, pid}
+    end
+
+    def open_session(_transport, _attrs), do: {:error, :open_failed}
+    def recv_frame(_transport, _timeout), do: {:error, :closed}
+    def send_message(_transport, _attrs), do: :ok
+    def send_control(_transport, _attrs), do: :ok
+
+    def stop(transport) when is_pid(transport) do
+      if Process.alive?(transport), do: Process.exit(transport, :kill)
+      :ok
+    end
+  end
+
   setup do
+    previous_trap_exit = Process.flag(:trap_exit, true)
     original_state = :sys.get_state(Prehen.Agents.Registry)
 
     fake_profile = %Profile{
@@ -19,6 +40,7 @@ defmodule Prehen.Gateway.SessionWorkerTest do
     end)
 
     on_exit(fn ->
+      Process.flag(:trap_exit, previous_trap_exit)
       :sys.replace_state(Prehen.Agents.Registry, fn _ -> original_state end)
     end)
 
@@ -69,5 +91,47 @@ defmodule Prehen.Gateway.SessionWorkerTest do
 
     assert event.payload == %{}
     assert event.metadata == %{}
+  end
+
+  test "removes registry route metadata when worker terminates after transport failure" do
+    assert {:ok, pid} =
+             SessionWorker.start_link(
+               gateway_session_id: "gw_cleanup",
+               agent_name: "fake_stdio",
+               test_pid: self()
+             )
+
+    assert {:ok, %{status: :attached}} = SessionRegistry.fetch("gw_cleanup")
+
+    monitor_ref = Process.monitor(pid)
+    transport_pid = :sys.get_state(pid).transport
+    Process.exit(transport_pid, :kill)
+
+    assert_receive {:DOWN, ^monitor_ref, :process, ^pid, _reason}, 2_000
+    assert {:error, :not_found} = SessionRegistry.fetch("gw_cleanup")
+  end
+
+  test "stops started transport when init fails after transport start" do
+    broken_profile = %Profile{
+      name: "broken_stdio",
+      command: ["noop"],
+      transport: BrokenOpenTransport,
+      metadata: %{test_pid: self()}
+    }
+
+    :sys.replace_state(Prehen.Agents.Registry, fn _ ->
+      %{ordered: [broken_profile], by_name: %{"broken_stdio" => broken_profile}}
+    end)
+
+    assert {:error, :open_failed} =
+             SessionWorker.start_link(
+               gateway_session_id: "gw_broken",
+               agent_name: "broken_stdio",
+               test_pid: self()
+             )
+
+    assert_receive {:broken_transport_started, transport_pid}, 1_000
+    ref = Process.monitor(transport_pid)
+    assert_receive {:DOWN, ^ref, :process, ^transport_pid, _reason}, 1_000
   end
 end
