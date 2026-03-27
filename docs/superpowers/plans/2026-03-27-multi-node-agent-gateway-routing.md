@@ -181,7 +181,7 @@ Expected: FAIL because remote launch and cross-node forwarding are not implement
 Add to `test/prehen_web/channels/session_channel_test.exs`:
 
 ```elixir
-test "joins a remote-routed session from the entry node and receives route failure events" do
+test "joins a remote-routed session from the entry node" do
   {:ok, remote_node} = Prehen.TestSupport.ClusterTestNode.start_link()
 
   assert {:ok, %{session_id: session_id}} =
@@ -194,9 +194,6 @@ test "joins a remote-routed session from the entry node and receives route failu
   assert {:ok, _, socket} =
            socket(PrehenWeb.UserSocket)
            |> subscribe_and_join(PrehenWeb.SessionChannel, "session:#{session_id}")
-
-  push(socket, "simulate_route_failure", %{})
-  assert_push "event", %{"type" => "route.failed", "session_id" => ^session_id}
 end
 ```
 
@@ -204,7 +201,7 @@ end
 
 Run: `mix test test/prehen_web/channels/session_channel_test.exs`
 
-Expected: FAIL because channel join still depends on local worker-pid lookup and has no remote failure signaling.
+Expected: FAIL because channel join still depends on local worker-pid lookup.
 
 - [ ] **Step 7: Do not commit yet**
 
@@ -220,7 +217,6 @@ Carry these failing tests into Task 2 so the first multi-node routing commit can
 - Modify: `lib/prehen_web/channels/session_channel.ex`
 - Test: `test/prehen/client/surface_test.exs`
 - Test: `test/prehen_web/channels/session_channel_test.exs`
-- Test: `test/prehen/gateway/cluster_session_test.exs`
 
 - [ ] **Step 1: Write the failing route-ledger test**
 
@@ -271,14 +267,14 @@ Route records should use a stable shape:
 
 - [ ] **Step 4: Change `SessionChannel.join/3` to attach by route existence, not local worker pid**
 
-Run: `mix test test/prehen/client/surface_test.exs test/prehen_web/channels/session_channel_test.exs test/prehen/gateway/cluster_session_test.exs`
+Run: `mix test test/prehen/client/surface_test.exs test/prehen_web/channels/session_channel_test.exs`
 
 Expected: PASS
 
 - [ ] **Step 5: Commit the route-state split and green contract tests**
 
 ```bash
-git add lib/prehen/gateway/local_session_index.ex lib/prehen/gateway/local_launcher.ex lib/prehen/gateway/session_registry.ex lib/prehen/client/surface.ex lib/prehen_web/channels/session_channel.ex test/prehen/client/surface_test.exs test/prehen_web/channels/session_channel_test.exs test/prehen/gateway/cluster_session_test.exs
+git add lib/prehen/gateway/local_session_index.ex lib/prehen/gateway/local_launcher.ex lib/prehen/gateway/session_registry.ex lib/prehen/client/surface.ex lib/prehen_web/channels/session_channel.ex test/prehen/client/surface_test.exs test/prehen_web/channels/session_channel_test.exs
 git commit -m "refactor: split route ledger from local worker index"
 ```
 
@@ -365,13 +361,63 @@ test "falls back to a healthy remote node when local capacity is exhausted" do
 end
 ```
 
-- [ ] **Step 2: Run the router test to verify it fails**
+- [ ] **Step 2: Add the failing local-preference, tie-break, and agent-unavailable tests**
+
+Add to `test/prehen/gateway/cluster_router_test.exs`:
+
+```elixir
+test "prefers the local node when it is healthy and supports the agent" do
+  :ok =
+    NodeRegistry.put_local_snapshot(%{
+      node: node(),
+      status: :up,
+      agent_names: ["fake_stdio"],
+      active_session_count: 0,
+      session_capacity: 2
+    })
+
+  assert {:ok, %{target_node: target_node}} = ClusterRouter.route(agent: "fake_stdio")
+  assert target_node == node()
+end
+
+test "breaks remote ties by lowest active_session_count" do
+  :ok =
+    NodeRegistry.merge_remote_snapshot(%{
+      node: :"remote_a@127.0.0.1",
+      status: :up,
+      agent_names: ["fake_stdio"],
+      active_session_count: 1,
+      session_capacity: 4,
+      updated_at_ms: System.system_time(:millisecond)
+    })
+
+  :ok =
+    NodeRegistry.merge_remote_snapshot(%{
+      node: :"remote_b@127.0.0.1",
+      status: :up,
+      agent_names: ["fake_stdio"],
+      active_session_count: 0,
+      session_capacity: 4,
+      updated_at_ms: System.system_time(:millisecond)
+    })
+
+  assert {:ok, %{target_node: :"remote_b@127.0.0.1"}} =
+           ClusterRouter.route(agent: "fake_stdio")
+end
+
+test "returns agent_not_available when no healthy node supports the requested agent" do
+  assert {:error, {:agent_not_available, "missing_agent"}} =
+           ClusterRouter.route(agent: "missing_agent")
+end
+```
+
+- [ ] **Step 3: Run the router test to verify it fails**
 
 Run: `mix test test/prehen/gateway/cluster_router_test.exs`
 
 Expected: FAIL because remote fallback is missing.
 
-- [ ] **Step 3: Implement cluster-aware selection**
+- [ ] **Step 4: Implement cluster-aware selection**
 
 `ClusterRouter.route/1` should return:
 
@@ -386,13 +432,13 @@ Expected: FAIL because remote fallback is missing.
 
 The `test_target_node` override used in tests must remain internal control-plane plumbing, not a public client API contract.
 
-- [ ] **Step 4: Re-run the router tests**
+- [ ] **Step 5: Re-run the router tests**
 
 Run: `mix test test/prehen/gateway/cluster_router_test.exs test/prehen/gateway/session_registry_test.exs`
 
 Expected: PASS
 
-- [ ] **Step 5: Commit cluster routing policy**
+- [ ] **Step 6: Commit cluster routing policy**
 
 ```bash
 git add lib/prehen/gateway/cluster_router.ex lib/prehen/gateway/router.ex lib/prehen/gateway/session_registry.ex test/prehen/gateway/cluster_router_test.exs test/prehen/gateway/session_registry_test.exs
@@ -460,6 +506,8 @@ def stop(gateway_session_id), do: :ok
 ```
 
 Only explicit pre-launch refusals may fall through to another candidate. Unknown outcomes must fail closed.
+
+`LocalSessionIndex` must reject duplicate active launches for the same `gateway_session_id`.
 
 - [ ] **Step 5: Re-run the remote control tests**
 
@@ -594,13 +642,42 @@ Add channel coverage for:
 assert_push "event", %{"type" => "route.failed", "session_id" => session_id}
 ```
 
-- [ ] **Step 4: Re-run the HTTP, controller, and channel tests**
+- [ ] **Step 4: Add a real target-node loss test**
+
+Add to `test/prehen/integration/platform_runtime_test.exs`:
+
+```elixir
+test "target-node loss marks the route failed and later submit calls fail explicitly" do
+  {:ok, remote_node} = Prehen.TestSupport.ClusterTestNode.start_link()
+
+  assert {:ok, %{session_id: session_id}} =
+           Surface.create_session(
+             agent: "fake_stdio",
+             gateway_session_id: "gw_target_loss",
+             test_target_node: remote_node
+           )
+
+  {:ok, _, _socket} =
+    socket(PrehenWeb.UserSocket)
+    |> subscribe_and_join(PrehenWeb.SessionChannel, "session:#{session_id}")
+
+  :ok = Prehen.TestSupport.ClusterTestNode.stop(remote_node)
+
+  assert_push "event", %{"type" => "route.failed", "session_id" => ^session_id}
+  assert {:ok, status} = Surface.session_status(session_id)
+  assert status.status in [:detached, :failed]
+  assert {:error, %{type: :submit_failed, reason: :target_node_unreachable}} =
+           Surface.submit_message(session_id, "after loss")
+end
+```
+
+- [ ] **Step 5: Re-run the HTTP, controller, and channel tests**
 
 Run: `mix test test/prehen/client/surface_test.exs test/prehen/integration/platform_runtime_test.exs test/prehen_web/channels/session_channel_test.exs`
 
 Expected: PASS
 
-- [ ] **Step 5: Commit node-aware status reporting**
+- [ ] **Step 6: Commit node-aware status reporting**
 
 ```bash
 git add lib/prehen/client/surface.ex lib/prehen_web/controllers/session_controller.ex lib/prehen_web/controllers/agent_controller.ex lib/prehen_web/serializers/event_serializer.ex test/prehen/client/surface_test.exs test/prehen/integration/platform_runtime_test.exs test/prehen_web/channels/session_channel_test.exs

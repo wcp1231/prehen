@@ -123,6 +123,8 @@ This index exists only on the node actually running the worker.
 
 The stable remote control key is `gateway_session_id` itself. The target node uses that key to resolve submit, status, and stop against its own local session index.
 
+The target-side local session index must reject duplicate active launches for the same `gateway_session_id`.
+
 ### 4.5 Node Registry
 
 Each node publishes a lightweight routing snapshot to the cluster.
@@ -254,7 +256,7 @@ Both local and remote sessions should be attached from the entry node using rout
 That means:
 
 - HTTP status reads consult the entry-node route ledger first
-- `SessionChannel.join/3` succeeds when a route exists, not only when a local worker pid exists
+- `SessionChannel.join/3` succeeds only when a route exists and `status == :attached`
 - local worker liveness is reflected into route status through gateway events
 - remote worker or target-node loss is reflected through route status and routing failure events
 
