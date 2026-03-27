@@ -35,10 +35,10 @@ defmodule Prehen.Gateway.InboxProjection do
   @spec session_started(map()) :: :ok
   def session_started(attrs), do: GenServer.call(__MODULE__, {:session_started, attrs})
 
-  @spec user_message(map()) :: :ok
+  @spec user_message(map()) :: :ok | {:error, :not_found}
   def user_message(attrs), do: GenServer.call(__MODULE__, {:user_message, attrs})
 
-  @spec agent_delta(map()) :: :ok
+  @spec agent_delta(map()) :: :ok | {:error, :not_found}
   def agent_delta(attrs), do: GenServer.call(__MODULE__, {:agent_delta, attrs})
 
   @spec fetch_session(String.t()) :: {:ok, session_row()} | {:error, :not_found}
@@ -64,68 +64,101 @@ defmodule Prehen.Gateway.InboxProjection do
 
   def handle_call({:session_started, attrs}, _from, state) do
     session_id = Map.fetch!(attrs, :session_id)
-    created_at = Map.get(attrs, :created_at)
 
-    row = %{
-      session_id: session_id,
-      agent_name: Map.get(attrs, :agent_name),
-      status: :attached,
-      created_at: created_at,
-      last_event_at: created_at,
-      preview: nil
-    }
+    case Map.has_key?(state.sessions, session_id) do
+      true ->
+        {:reply, :ok, state}
 
-    next_state =
-      state
-      |> put_session(row)
-      |> ensure_history(session_id)
+      false ->
+        created_at = Map.get(attrs, :created_at)
 
-    {:reply, :ok, next_state}
+        row = %{
+          session_id: session_id,
+          agent_name: Map.get(attrs, :agent_name),
+          status: :attached,
+          created_at: created_at,
+          last_event_at: created_at,
+          preview: nil
+        }
+
+        next_state =
+          state
+          |> put_session(row)
+          |> ensure_history(session_id)
+
+        {:reply, :ok, next_state}
+    end
   end
 
   def handle_call({:user_message, attrs}, _from, state) do
     session_id = Map.fetch!(attrs, :session_id)
-    {timestamp, next_state} = next_timestamp(state, session_id)
 
-    entry = %{
-      id: next_history_id(),
-      kind: :user_message,
-      session_id: session_id,
-      message_id: Map.fetch!(attrs, :message_id),
-      text: Map.get(attrs, :text, ""),
-      timestamp: timestamp
-    }
+    case Map.has_key?(state.sessions, session_id) do
+      false ->
+        {:reply, {:error, :not_found}, state}
 
-    next_state =
-      next_state
-      |> ensure_history(session_id)
-      |> append_history(session_id, entry)
-      |> update_session_row(session_id, entry)
+      true ->
+        {timestamp, next_state} = next_timestamp(state, session_id)
 
-    {:reply, :ok, next_state}
+        entry = %{
+          id: next_history_id(),
+          kind: :user_message,
+          session_id: session_id,
+          message_id: Map.fetch!(attrs, :message_id),
+          text: Map.get(attrs, :text, ""),
+          timestamp: timestamp
+        }
+
+        next_state =
+          next_state
+          |> ensure_history(session_id)
+          |> append_history(session_id, entry)
+          |> update_session_row(session_id, entry)
+
+        {:reply, :ok, next_state}
+    end
   end
 
   def handle_call({:agent_delta, attrs}, _from, state) do
     session_id = Map.fetch!(attrs, :session_id)
-    message_id = Map.fetch!(attrs, :message_id)
-    text = Map.get(attrs, :text, "")
-    {timestamp, next_state} = next_timestamp(state, session_id)
 
-    next_state =
-      next_state
-      |> ensure_history(session_id)
-      |> merge_assistant_delta(session_id, message_id, text, timestamp)
-      |> update_session_from_latest_history(session_id)
+    case Map.has_key?(state.sessions, session_id) do
+      false ->
+        {:reply, {:error, :not_found}, state}
 
-    {:reply, :ok, next_state}
+      true ->
+        message_id = Map.fetch!(attrs, :message_id)
+        text = Map.get(attrs, :text, "")
+        {timestamp, next_state} = next_timestamp(state, session_id)
+
+        next_state =
+          next_state
+          |> ensure_history(session_id)
+          |> merge_assistant_delta(session_id, message_id, text, timestamp)
+          |> update_session_from_latest_history(session_id)
+
+        {:reply, :ok, next_state}
+    end
   end
 
   def handle_call({:fetch_session, session_id}, _from, state) do
-    {:reply, Map.fetch(state.sessions, session_id), state}
+    reply =
+      case Map.fetch(state.sessions, session_id) do
+        {:ok, row} -> {:ok, row}
+        :error -> {:error, :not_found}
+      end
+
+    {:reply, reply, state}
   end
 
   def handle_call({:fetch_history, session_id}, _from, state) do
-    {:reply, Map.fetch(state.history, session_id), state}
+    reply =
+      case Map.fetch(state.history, session_id) do
+        {:ok, history} -> {:ok, history}
+        :error -> {:error, :not_found}
+      end
+
+    {:reply, reply, state}
   end
 
   defp empty_state do

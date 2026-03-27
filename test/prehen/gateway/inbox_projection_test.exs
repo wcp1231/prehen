@@ -131,4 +131,70 @@ defmodule Prehen.Gateway.InboxProjectionTest do
     assert row.preview == "hello"
     assert row.last_event_at == timestamp
   end
+
+  test "duplicate session_started is a no-op that preserves row and history" do
+    assert :ok =
+             InboxProjection.session_started(%{
+               session_id: "gw_duplicate",
+               agent_name: "fake_stdio",
+               created_at: 1_774_625_000_000
+             })
+
+    assert :ok =
+             InboxProjection.user_message(%{
+               session_id: "gw_duplicate",
+               message_id: "request_duplicate",
+               text: "hello"
+             })
+
+    assert {:ok, original_row} = InboxProjection.fetch_session("gw_duplicate")
+    assert {:ok, original_history} = InboxProjection.fetch_history("gw_duplicate")
+
+    assert :ok =
+             InboxProjection.session_started(%{
+               session_id: "gw_duplicate",
+               agent_name: "other_agent",
+               created_at: 1_999_999_999_999
+             })
+
+    assert {:ok, row} = InboxProjection.fetch_session("gw_duplicate")
+    assert {:ok, history} = InboxProjection.fetch_history("gw_duplicate")
+
+    assert row == original_row
+    assert history == original_history
+    assert is_integer(row.last_event_at)
+
+    assert [
+             %{
+               session_id: "gw_duplicate",
+               agent_name: "fake_stdio",
+               status: :attached,
+               created_at: 1_774_625_000_000,
+               last_event_at: last_event_at,
+               preview: "hello"
+             }
+           ] = InboxProjection.list_sessions()
+
+    assert last_event_at == row.last_event_at
+  end
+
+  test "rejects unknown-session events without creating orphaned history" do
+    assert {:error, :not_found} =
+             InboxProjection.user_message(%{
+               session_id: "gw_missing",
+               message_id: "request_missing",
+               text: "hello"
+             })
+
+    assert {:error, :not_found} =
+             InboxProjection.agent_delta(%{
+               session_id: "gw_missing",
+               message_id: "request_missing",
+               text: "hi"
+             })
+
+    assert {:error, :not_found} = InboxProjection.fetch_session("gw_missing")
+    assert {:error, :not_found} = InboxProjection.fetch_history("gw_missing")
+    assert [] = InboxProjection.list_sessions()
+  end
 end
