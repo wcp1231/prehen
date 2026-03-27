@@ -358,6 +358,7 @@ git commit -m "feat: add gateway inbox projection"
 - Modify: `lib/prehen/gateway/session_worker.ex`
 - Modify: `lib/prehen/gateway/session_registry.ex`
 - Modify: `lib/prehen/client/surface.ex`
+- Modify: `test/support/fake_stdio_agent.exs`
 - Modify: `test/prehen/gateway/inbox_projection_test.exs`
 - Modify: `test/prehen/integration/platform_runtime_test.exs`
 
@@ -386,6 +387,35 @@ test "keeps terminal session history readable after stop" do
 
   assert {:ok, history} = InboxProjection.fetch_history("gw_terminal")
   assert Enum.any?(history, &(&1.kind == :user_message))
+end
+```
+
+Add a second failing test in the same file:
+
+```elixir
+test "transitions from attached to running to idle for one request" do
+  InboxProjection.session_started(%{
+    session_id: "gw_status",
+    agent_name: "fake_stdio",
+    created_at: 1_774_625_000_000
+  })
+
+  InboxProjection.user_message(%{
+    session_id: "gw_status",
+    message_id: "request_status",
+    text: "hello"
+  })
+
+  assert {:ok, row} = InboxProjection.fetch_session("gw_status")
+  assert row.status == :running
+
+  InboxProjection.agent_completed(%{
+    session_id: "gw_status",
+    message_id: "request_status"
+  })
+
+  assert {:ok, row} = InboxProjection.fetch_session("gw_status")
+  assert row.status == :idle
 end
 ```
 
@@ -418,6 +448,15 @@ InboxProjection.agent_delta(%{
   text: frame_text(payload)
 })
 ```
+
+Status transition rule for v1:
+
+- `attached` after successful session startup
+- `running` immediately after a user message is accepted
+- `idle` after the worker receives `session.output.completed`
+- `stopped` or `crashed` on terminal worker exit
+
+To make `idle` testable, update `test/support/fake_stdio_agent.exs` so it emits a `session.output.completed` frame after its text delta.
 
 - [ ] **Step 4: Mark terminal sessions without deleting their retained history**
 
@@ -472,6 +511,22 @@ test "returns a structured error when session creation fails" do
   conn = post(build_conn(), "/inbox/sessions", %{"agent" => "missing_agent"})
 
   assert %{"error" => %{"type" => "unprocessable_entity"}} = json_response(conn, 422)
+end
+
+test "creates a session with the default agent when agent is omitted" do
+  conn = post(build_conn(), "/inbox/sessions", %{})
+  assert %{"session_id" => _session_id, "agent" => "fake_stdio"} = json_response(conn, 201)
+end
+
+test "stop is idempotent for a retained terminal session" do
+  conn = post(build_conn(), "/inbox/sessions", %{"agent" => "fake_stdio"})
+  assert %{"session_id" => session_id} = json_response(conn, 201)
+
+  conn = delete(build_conn(), "/inbox/sessions/#{session_id}")
+  assert response(conn, 204)
+
+  conn = delete(build_conn(), "/inbox/sessions/#{session_id}")
+  assert response(conn, 204)
 end
 ```
 
@@ -534,13 +589,21 @@ Examples to preserve:
 - worker spawn failure
 - transport handshake failure
 
-- [ ] **Step 6: Run the HTTP integration tests**
+- [ ] **Step 6: Make inbox stop idempotent for retained terminal sessions**
+
+`Inbox.stop_session(session_id)` should:
+
+- stop a live session through the existing gateway stop path
+- return `:ok` when the session is already terminal but still retained in the inbox projection
+- return not found only when the inbox has no retained row for that session id
+
+- [ ] **Step 7: Run the HTTP integration tests**
 
 Run: `mix test test/prehen/integration/web_inbox_test.exs test/prehen/integration/platform_runtime_test.exs`
 
 Expected: PASS
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add lib/prehen_web/controllers/inbox_controller.ex lib/prehen_web/controllers/agent_controller.ex lib/prehen_web/router.ex test/prehen/integration/web_inbox_test.exs
@@ -784,6 +847,7 @@ Expected: succeeds without introducing old-runtime compile dependencies
 5. Switch between sessions
 6. Stop one session
 7. Confirm stopped session still renders retained history and rejects submit
+8. Confirm stopping the same terminal session again still succeeds
 
 - [ ] **Step 6: Commit**
 
