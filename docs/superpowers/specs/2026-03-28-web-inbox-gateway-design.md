@@ -79,7 +79,7 @@ Properties:
 - it shows all current sessions known to this Prehen node
 - it does not try to distinguish users
 - it is intended for a single-node operator or local developer workflow
-- it uses the current gateway session as the stable unit of selection
+- it uses the current gateway session id, exposed everywhere as `session_id`, as the stable unit of selection
 
 The inbox is therefore closer to a node control console than to a general chat application.
 
@@ -122,7 +122,7 @@ The inbox needs a node-local list view over current sessions.
 
 The session index should expose at least:
 
-- `gateway_session_id`
+- `session_id`
 - `agent_name`
 - `status`
 - `created_at`
@@ -254,6 +254,12 @@ Recommended status vocabulary:
 - `idle`
 - `stopped`
 - `crashed`
+
+Expected meaning in the first version:
+
+- `attached` means the gateway session is bound to a live agent session and can accept messages
+- `running` means the selected session is currently processing a submitted message or streaming output
+- `idle` means the session remains live but is not actively processing output
 
 These values should be derived from gateway lifecycle and event observations, not delegated to agent-specific private states.
 
@@ -406,8 +412,8 @@ Minimum manual verification should include:
 3. Send a message and verify the agent response streams into the timeline.
 4. Create a second session and switch between them.
 5. Stop one session and confirm the UI shows a terminal state.
-6. Confirm deleted/stopped sessions remain selectable and still show retained history.
-7. Confirm deleted/stopped sessions cannot accept new messages.
+6. Confirm stopped sessions remain selectable and still show retained history.
+7. Confirm stopped sessions cannot accept new messages.
 
 ## 16. Implementation Boundary
 
@@ -425,6 +431,11 @@ Those can be added later once the single-node Web message path is stable and ope
 ## 17. Minimal API Contract Appendix
 
 The first implementation should keep the inbox API intentionally small and JSON-first.
+
+Canonical naming rule:
+
+- the gateway-facing session identifier is always `session_id`
+- the internal agent-owned identifier, when exposed at all, remains `agent_session_id`
 
 ### 17.1 `GET /agents`
 
@@ -537,3 +548,8 @@ Behavior:
 - if the session is already terminal, return success without changing retention semantics
 - keep the session visible in the inbox list with terminal status
 - keep retained in-memory history readable until node restart
+
+UI wording rule:
+
+- the user-facing action should be labeled as `Stop Session`
+- the HTTP transport may still use `DELETE /inbox/sessions/:id` as the control-plane verb
