@@ -13,10 +13,12 @@ defmodule Prehen.Gateway.InboxProjection do
         }
 
   @type history_entry :: %{
+          id: String.t(),
           kind: :user_message | :assistant_message,
           session_id: String.t(),
-          message_id: String.t(),
-          text: String.t()
+          message_id: String.t() | nil,
+          text: String.t(),
+          timestamp: integer()
         }
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -83,18 +85,22 @@ defmodule Prehen.Gateway.InboxProjection do
 
   def handle_call({:user_message, attrs}, _from, state) do
     session_id = Map.fetch!(attrs, :session_id)
+    {timestamp, next_state} = next_timestamp(state, session_id)
 
     entry = %{
+      id: next_history_id(),
       kind: :user_message,
       session_id: session_id,
       message_id: Map.fetch!(attrs, :message_id),
-      text: Map.get(attrs, :text, "")
+      text: Map.get(attrs, :text, ""),
+      timestamp: timestamp
     }
 
     next_state =
-      state
+      next_state
       |> ensure_history(session_id)
       |> append_history(session_id, entry)
+      |> update_session_row(session_id, entry)
 
     {:reply, :ok, next_state}
   end
@@ -103,12 +109,13 @@ defmodule Prehen.Gateway.InboxProjection do
     session_id = Map.fetch!(attrs, :session_id)
     message_id = Map.fetch!(attrs, :message_id)
     text = Map.get(attrs, :text, "")
+    {timestamp, next_state} = next_timestamp(state, session_id)
 
     next_state =
-      state
+      next_state
       |> ensure_history(session_id)
-      |> merge_assistant_delta(session_id, message_id, text)
-      |> update_preview(session_id)
+      |> merge_assistant_delta(session_id, message_id, text, timestamp)
+      |> update_session_from_latest_history(session_id)
 
     {:reply, :ok, next_state}
   end
@@ -137,39 +144,49 @@ defmodule Prehen.Gateway.InboxProjection do
     update_in(state.history[session_id], fn history -> history ++ [entry] end)
   end
 
-  defp merge_assistant_delta(state, session_id, message_id, text) do
+  defp merge_assistant_delta(state, session_id, message_id, text, timestamp) do
     update_in(state.history[session_id], fn history ->
       case Enum.split(history, -1) do
         {prefix, [%{kind: :assistant_message, message_id: ^message_id} = last]} ->
-          prefix ++ [%{last | text: last.text <> text}]
+          prefix ++ [%{last | text: last.text <> text, timestamp: timestamp}]
 
         _ ->
           history ++
             [
               %{
+                id: next_history_id(),
                 kind: :assistant_message,
                 session_id: session_id,
                 message_id: message_id,
-                text: text
+                text: text,
+                timestamp: timestamp
               }
             ]
       end
     end)
   end
 
-  defp update_preview(state, session_id) do
-    preview =
-      state.history
-      |> Map.fetch!(session_id)
-      |> Enum.reverse()
-      |> Enum.find_value(fn
-        %{kind: :assistant_message, text: text} -> text
-        _ -> nil
-      end)
-
+  defp update_session_row(state, session_id, entry) do
     update_in(state.sessions[session_id], fn
       nil -> nil
-      row -> %{row | preview: preview}
+      row -> %{row | preview: entry.text, last_event_at: entry.timestamp}
     end)
+  end
+
+  defp update_session_from_latest_history(state, session_id) do
+    latest_entry = state.history |> Map.fetch!(session_id) |> List.last()
+    update_session_row(state, session_id, latest_entry)
+  end
+
+  defp next_timestamp(state, session_id) do
+    session = Map.get(state.sessions, session_id, %{})
+    base_timestamp = Map.get(session, :last_event_at) || System.system_time(:millisecond)
+    {max(System.system_time(:millisecond), base_timestamp + 1), state}
+  end
+
+  defp next_history_id do
+    System.unique_integer([:positive, :monotonic])
+    |> Integer.to_string()
+    |> then(&("history_" <> &1))
   end
 end
