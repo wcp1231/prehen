@@ -1,7 +1,7 @@
 # Prehen Single-Node Agent Gateway MVP Design
 
 Date: 2026-03-27
-Status: Draft approved in brainstorming
+Status: Implemented reference design
 
 ## 1. Goal
 
@@ -266,7 +266,7 @@ This constraint should be explicit in both implementation and documentation.
 
 ### 10.3 Temporary Compatibility
 
-Short-term compatibility shims are acceptable only if they accelerate the cutover. They must not preserve the old runtime as the long-term core.
+The implementation has already cut over to the gateway-first path. Any remaining compatibility surface must fail explicitly or be removed in later cleanup, and it must not reintroduce the old runtime as the active core.
 
 ## 11. Acceptance Criteria
 
