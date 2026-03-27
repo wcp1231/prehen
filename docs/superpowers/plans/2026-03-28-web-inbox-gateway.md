@@ -134,6 +134,35 @@ defmodule Prehen.Gateway.InboxProjectionTest do
     assert {:ok, history} = InboxProjection.fetch_history("gw_inbox_1")
     assert Enum.map(history, & &1.kind) == [:user_message, :assistant_message]
   end
+
+  test "merges multiple deltas for one assistant message" do
+    assert :ok =
+             InboxProjection.session_started(%{
+               session_id: "gw_delta_merge",
+               agent_name: "fake_stdio",
+               created_at: 1_774_625_000_000
+             })
+
+    assert :ok =
+             InboxProjection.agent_delta(%{
+               session_id: "gw_delta_merge",
+               message_id: "request_merge",
+               text: "he"
+             })
+
+    assert :ok =
+             InboxProjection.agent_delta(%{
+               session_id: "gw_delta_merge",
+               message_id: "request_merge",
+               text: "llo"
+             })
+
+    assert {:ok, history} = InboxProjection.fetch_history("gw_delta_merge")
+
+    assert [
+             %{kind: :assistant_message, message_id: "request_merge", text: "hello"}
+           ] = history
+  end
 end
 ```
 
@@ -152,11 +181,17 @@ defmodule Prehen.Integration.WebInboxTest do
 
   @endpoint PrehenWeb.Endpoint
 
-  test "lists agents and sessions for the inbox page" do
+  test "lists sessions for the inbox page" do
     conn = get(build_conn(), "/inbox/sessions")
 
-    assert %{"sessions" => sessions, "default_agent" => _default_agent} = json_response(conn, 200)
+    assert %{"sessions" => sessions} = json_response(conn, 200)
     assert is_list(sessions)
+  end
+
+  test "lists agents with default metadata and handles an empty registry" do
+    conn = get(build_conn(), "/agents")
+    assert %{"agents" => agents} = json_response(conn, 200)
+    assert is_list(agents)
   end
 end
 ```
@@ -278,6 +313,16 @@ end
   }
 }
 ```
+
+The merge invariant is required:
+
+```elixir
+[
+  %{kind: :assistant_message, message_id: "request_merge", text: "hello"}
+]
+```
+
+Do not append one assistant history record per delta.
 
 - [ ] **Step 3: Add the inbox facade used by controllers**
 
@@ -409,7 +454,8 @@ git commit -m "feat: project inbox session history"
 ```elixir
 test "creates, reads, and stops inbox sessions" do
   conn = post(build_conn(), "/inbox/sessions", %{"agent" => "fake_stdio"})
-  assert %{"session_id" => session_id, "status" => "attached"} = json_response(conn, 201)
+  assert %{"session_id" => session_id, "status" => "attached", "agent" => "fake_stdio"} =
+           json_response(conn, 201)
 
   conn = get(build_conn(), "/inbox/sessions/#{session_id}")
   assert %{"session" => %{"session_id" => ^session_id}} = json_response(conn, 200)
@@ -441,14 +487,14 @@ def create(conn, params) do
     |> put_status(:created)
     |> json(%{
       session_id: session.session_id,
-      agent_name: detail.agent_name,
+      agent: detail.agent_name,
       status: Atom.to_string(detail.status)
     })
   end
 end
 ```
 
-- [ ] **Step 4: Make `/agents` inbox-friendly**
+- [ ] **Step 4: Make `/agents` inbox-friendly and test the empty-registry case**
 
 Return:
 
@@ -460,7 +506,17 @@ Return:
 }
 ```
 
-If there are no agents, return `{"agents": []}` and let `/inbox/sessions` expose `default_agent: nil`.
+If there are no agents, return `{"agents": []}`.
+
+Add a focused test like:
+
+```elixir
+test "GET /agents marks one default agent when profiles exist" do
+  conn = get(build_conn(), "/agents")
+  assert %{"agents" => [first | _]} = json_response(conn, 200)
+  assert Map.has_key?(first, "default")
+end
+```
 
 - [ ] **Step 5: Run the HTTP integration tests**
 
@@ -604,9 +660,18 @@ selectSession(sessionId)
 attachChannel(sessionId)
 submitMessage(sessionId, text)
 applyGatewayEvent(event)
+setComposerDisabled(disabled)
+appendSystemNote(sessionId, text)
+renderSelectedSessionStatus(status)
 ```
 
 Do not add a build step or framework.
+
+When the selected session becomes terminal or submit returns an error:
+
+- keep the session selected
+- append a visible system/error note into the timeline
+- disable the composer until the user switches to a live session
 
 - [ ] **Step 5: Run the page and integration tests**
 
@@ -627,17 +692,23 @@ git commit -m "feat: add web inbox page"
 - Modify: `README.md`
 - Modify: `docs/architecture/current-system.md`
 - Modify: `test/prehen/integration/web_inbox_test.exs`
+- Modify: `test/prehen_web/channels/session_channel_test.exs`
 - Modify: `test/prehen/cli_test.exs` (only if existing CLI assumptions regress)
 
-- [ ] **Step 1: Add the final integration test for create -> select -> message -> stop semantics**
+- [ ] **Step 1: Add the final end-to-end test for create -> channel submit -> stop semantics**
 
 ```elixir
-test "inbox sessions remain selectable after stop but reject new messages" do
+test "web inbox flow can create over HTTP and submit over SessionChannel" do
   conn = post(build_conn(), "/inbox/sessions", %{"agent" => "fake_stdio"})
   assert %{"session_id" => session_id} = json_response(conn, 201)
 
-  conn = post(build_conn(), "/sessions/#{session_id}/messages", %{"text" => "hello"})
-  assert %{"status" => "accepted"} = json_response(conn, 202)
+  {:ok, _, socket} =
+    socket(PrehenWeb.UserSocket)
+    |> subscribe_and_join(PrehenWeb.SessionChannel, "session:#{session_id}")
+
+  ref = push(socket, "submit", %{"text" => "hello"})
+  assert_reply ref, :ok, %{"request_id" => request_id}
+  assert_push "event", %{"type" => "session.output.delta", "payload" => %{"message_id" => ^request_id}}
 
   conn = delete(build_conn(), "/inbox/sessions/#{session_id}")
   assert response(conn, 204)
