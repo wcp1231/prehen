@@ -1,6 +1,7 @@
 defmodule Prehen.Gateway.SessionWorkerTest do
   use ExUnit.Case, async: false
 
+  alias Prehen.Agents.Envelope
   alias Prehen.Agents.Profile
   alias Prehen.Gateway.SessionRegistry
   alias Prehen.Gateway.SessionWorker
@@ -53,5 +54,20 @@ defmodule Prehen.Gateway.SessionWorkerTest do
              "message_id" => "message_1",
              "text" => "hi"
            }
+  end
+
+  test "envelope normalizes explicit nil payload and metadata" do
+    event =
+      Envelope.build("session.output.delta", %{
+        gateway_session_id: "gw_2",
+        agent_session_id: "agent_gw_2",
+        agent: "fake_stdio",
+        seq: 1,
+        payload: nil,
+        metadata: nil
+      })
+
+    assert event.payload == %{}
+    assert event.metadata == %{}
   end
 end
