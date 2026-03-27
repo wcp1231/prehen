@@ -3,12 +3,12 @@ defmodule Prehen.Application do
   Prehen 应用根监督树。
 
   中文：
-  - 统一启动平台核心子系统（agent/session/memory/store/projection/tools）。
+  - 统一启动当前 Gateway MVP 所需的核心子系统。
   - 提供健康检查快照，便于定位子系统状态。
 
   English:
   - Root supervision tree for platform subsystems.
-  - Boots agent/session/memory/store/projection/tools components.
+  - Boots the core subsystems required by the current gateway MVP.
   - Exposes health snapshots for operational diagnostics.
   """
 

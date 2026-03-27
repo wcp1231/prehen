@@ -162,23 +162,8 @@ defmodule Prehen.Client.SurfaceTest do
              "match:#{result.request_id}"
   end
 
-  test "runtime-backed APIs fail explicitly in gateway MVP mode" do
-    assert {:error, %{type: :unsupported_api, reason: %{api: :resume_session}}} =
-             Surface.resume_session("session_1")
-
-    assert {:error, %{type: :unsupported_api, reason: %{api: :await_result}}} =
-             Surface.await_result(self())
-
-    assert {:error, %{type: :unsupported_api, reason: %{api: :list_sessions}}} =
-             Surface.list_sessions()
-
-    assert {:error, %{type: :unsupported_api, reason: %{api: :replay_session}}} =
-             Surface.replay_session("session_1")
-
-    assert {:error, %{type: :unsupported_api, reason: %{api: :set_capability_packs}}} =
-             Surface.set_capability_packs([:local_fs])
-
-    assert {:error, %{type: :unsupported_api, reason: %{api: :subscribe_events}}} =
-             Surface.subscribe_events("session_1")
+  test "run/2 returns a structured error when attaching a missing gateway session" do
+    assert {:error, %{type: :runtime_failed, reason: {:gateway_session_not_found, "missing"}}} =
+             Surface.run("do task", session_id: "missing", timeout_ms: 100)
   end
 end

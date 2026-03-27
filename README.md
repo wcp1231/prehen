@@ -23,7 +23,6 @@ Included in the current MVP:
 
 Not included in the MVP:
 
-- legacy runtime session APIs such as resume/replay/list workspace sessions
 - persistent session recovery
 - multi-node routing or cluster forwarding
 - tool mediation through Prehen
@@ -55,14 +54,13 @@ prehen run --agent NAME "<task>" [--workspace PATH] [--session-id ID] [--timeout
 
 ## Configuration
 
-Local agent profiles are configured through structured files:
+The gateway now only reads a small runtime config surface:
 
-- `$WORKSPACE_DIR/.prehen/config/providers.yaml`
-- `$WORKSPACE_DIR/.prehen/config/agents.yaml`
-- `$WORKSPACE_DIR/.prehen/config/runtime.yaml`
-- `$WORKSPACE_DIR/.prehen/config/secrets.yaml`
+- `:prehen, :agent_profiles` application env for boot-time local agent profiles
+- `PREHEN_TIMEOUT_MS` or `timeout_ms:` override for one-shot run timeouts
+- `PREHEN_TRACE_JSON` or `trace_json:` override for CLI trace output
 
-Workspace-level config wins over `$HOME/.prehen/global/config/*`.
+There is no longer a built-in structured config loader for providers, secrets, runtime templates, or workspace layout.
 
 ## Gateway Surface
 
@@ -73,17 +71,6 @@ Public gateway entrypoints:
 - `Prehen.session_status/1`
 - `Prehen.stop_session/1`
 - `Prehen.run/2`
-
-Explicitly unsupported in the gateway MVP:
-
-- `Prehen.resume_session/2`
-- `Prehen.await_result/2`
-- `Prehen.list_sessions/1`
-- `Prehen.replay_session/2`
-- `Prehen.set_capability_packs/2`
-- `Prehen.subscribe_events/1`
-
-These now fail with a structured `unsupported_api` error instead of delegating into the removed runtime path.
 
 ## Event Model
 

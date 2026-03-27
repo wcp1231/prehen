@@ -3,7 +3,7 @@ defmodule Prehen.CLI do
 
   @usage """
   Usage:
-    prehen run --agent NAME "<task>" [--workspace PATH] [--session-id ID] [--max-steps N] [--timeout-ms N] [--trace-json]
+    prehen run --agent NAME "<task>" [--workspace PATH] [--session-id ID] [--timeout-ms N] [--trace-json]
   """
 
   @spec main([String.t()]) :: {:ok, map()} | {:error, term()}
@@ -14,7 +14,6 @@ defmodule Prehen.CLI do
           workspace: :string,
           session_id: :string,
           agent: :string,
-          max_steps: :integer,
           timeout_ms: :integer,
           trace_json: :boolean
         ]

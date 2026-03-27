@@ -40,15 +40,6 @@ defmodule Prehen.Client.Surface do
   end
 
   @doc """
-  Gateway MVP 不支持恢复旧 runtime 会话。
-  Gateway MVP does not support resuming legacy runtime sessions.
-  """
-  @spec resume_session(String.t(), keyword()) :: {:error, map()}
-  def resume_session(session_id, opts \\ []) when is_binary(session_id) and is_list(opts) do
-    unsupported_api(:resume_session, %{session_id: session_id, opts: opts})
-  end
-
-  @doc """
   提交一条用户消息（prompt/steering/follow_up）并返回统一回执。
   Submit one message (`prompt/steering/follow_up`) with a unified ack payload.
   """
@@ -100,15 +91,6 @@ defmodule Prehen.Client.Surface do
     end
   end
 
-  @doc """
-  Gateway MVP 不暴露旧 runtime 的 await_result 语义。
-  Gateway MVP does not expose the legacy runtime await_result flow.
-  """
-  @spec await_result(pid(), keyword()) :: {:error, map()}
-  def await_result(session_pid, opts \\ []) when is_pid(session_pid) and is_list(opts) do
-    unsupported_api(:await_result, %{session_pid: session_pid, opts: opts})
-  end
-
   @spec stop_session(String.t()) :: :ok | {:error, map()}
   def stop_session(session_id) when is_binary(session_id) do
     with {:ok, worker_pid} <- SessionRegistry.fetch_worker(session_id),
@@ -125,43 +107,6 @@ defmodule Prehen.Client.Surface do
   end
 
   @doc """
-  Gateway MVP 不再暴露旧 projection-based 事件订阅接口。
-  Gateway MVP no longer exposes the legacy projection-based event subscription API.
-  """
-  @spec subscribe_events(String.t()) :: {:error, map()}
-  def subscribe_events(session_id) when is_binary(session_id) do
-    unsupported_api(:subscribe_events, %{session_id: session_id})
-  end
-
-  @doc """
-  Gateway MVP 不支持列出旧 runtime/workspace 会话。
-  Gateway MVP does not support listing legacy runtime/workspace sessions.
-  """
-  @spec list_sessions(keyword()) :: {:error, map()}
-  def list_sessions(opts \\ []) when is_list(opts) do
-    unsupported_api(:list_sessions, %{opts: opts})
-  end
-
-  @doc """
-  Gateway MVP 不支持回放旧 conversation store 历史。
-  Gateway MVP does not support replaying legacy conversation-store history.
-  """
-  @spec replay_session(String.t(), keyword()) :: {:error, map()}
-  def replay_session(session_id, opts \\ [])
-      when is_binary(session_id) and is_list(opts) do
-    unsupported_api(:replay_session, %{session_id: session_id, opts: opts})
-  end
-
-  @doc """
-  Gateway MVP 不支持旧 runtime capability pack 控制面。
-  Gateway MVP does not support the legacy runtime capability-pack control plane.
-  """
-  @spec set_capability_packs([atom()], keyword()) :: {:error, map()}
-  def set_capability_packs(packs, opts \\ []) when is_list(packs) and is_list(opts) do
-    unsupported_api(:set_capability_packs, %{packs: packs, opts: opts})
-  end
-
-  @doc """
   兼容 CLI 的一站式运行入口（内部创建会话并执行）。
   One-shot execution helper for CLI compatibility (creates session internally).
   """
@@ -169,12 +114,10 @@ defmodule Prehen.Client.Surface do
   def run(task, opts \\ []) when is_binary(task) and is_list(opts) do
     config = Config.load(opts)
     timeout = Keyword.get(opts, :timeout_ms, config[:timeout_ms])
-    config_error = maybe_ignore_gateway_agent_template_error(config[:config_error])
     request_id = gen_id("request")
 
     try do
-      with nil <- config_error,
-           {:ok, session} <- start_or_attach_gateway_session(opts),
+      with {:ok, session} <- start_or_attach_gateway_session(opts),
            {:ok, response, matched_event} <-
              submit_and_await_gateway_answer(session.session_id, task, request_id, timeout),
            {:ok, trace} <- Prehen.Trace.for_session(session.session_id) do
@@ -190,9 +133,6 @@ defmodule Prehen.Client.Surface do
            queued: response.queued
          }}
       else
-        config_error when is_map(config_error) ->
-          {:error, error_payload(:runtime_failed, config_error)}
-
         {:error, reason} ->
           {:error, error_payload(:runtime_failed, reason)}
       end
@@ -200,9 +140,6 @@ defmodule Prehen.Client.Surface do
       maybe_stop_gateway_session_if_owned(opts)
     end
   end
-
-  defp maybe_ignore_gateway_agent_template_error(%{code: :agent_template_not_found}), do: nil
-  defp maybe_ignore_gateway_agent_template_error(other), do: other
 
   defp submit_and_await_gateway_answer(session_id, task, request_id, timeout_ms) do
     topic = "session:#{session_id}"
@@ -333,10 +270,6 @@ defmodule Prehen.Client.Surface do
   end
 
   defp normalize_session_id(session_id), do: to_string(session_id)
-
-  defp unsupported_api(api, detail) do
-    {:error, error_payload(:unsupported_api, Map.merge(%{api: api, mode: :gateway_mvp}, detail))}
-  end
 
   defp error_payload(type, reason) do
     %{

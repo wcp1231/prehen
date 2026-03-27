@@ -3,11 +3,11 @@ defmodule Prehen do
   Prehen 平台公开 API。
 
   中文：
-  - 对外提供运行、会话生命周期、消息提交与事件订阅等能力。
+  - 对外提供当前 Gateway MVP 的运行、会话生命周期与消息提交能力。
   - 使用统一 client surface 入口。
 
   English:
-  - Public API for runtime execution, session lifecycle, messaging, and event subscription.
+  - Public API for the current gateway MVP execution, session lifecycle, and messaging flows.
   - Uses the unified client surface as the primary entrypoint.
   """
 
@@ -23,11 +23,6 @@ defmodule Prehen do
     Surface.create_session(opts)
   end
 
-  @spec resume_session(String.t(), keyword()) :: {:error, map()}
-  def resume_session(session_id, opts \\ []) when is_binary(session_id) and is_list(opts) do
-    Surface.resume_session(session_id, opts)
-  end
-
   @spec submit_message(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, map()}
   def submit_message(session_id, text, opts \\ [])
       when is_binary(session_id) and is_binary(text) do
@@ -39,33 +34,8 @@ defmodule Prehen do
     Surface.stop_session(session_id)
   end
 
-  @spec await_result(pid(), keyword()) :: {:error, map()}
-  def await_result(session_pid, opts \\ []) when is_pid(session_pid) and is_list(opts) do
-    Surface.await_result(session_pid, opts)
-  end
-
-  @spec list_sessions(keyword()) :: {:error, map()}
-  def list_sessions(opts \\ []) do
-    Surface.list_sessions(opts)
-  end
-
   @spec session_status(String.t()) :: {:ok, map()} | {:error, map()}
   def session_status(session_id) when is_binary(session_id) do
     Surface.session_status(session_id)
-  end
-
-  @spec replay_session(String.t(), keyword()) :: {:error, map()}
-  def replay_session(session_id, opts \\ []) when is_binary(session_id) and is_list(opts) do
-    Surface.replay_session(session_id, opts)
-  end
-
-  @spec set_capability_packs([atom()], keyword()) :: {:error, map()}
-  def set_capability_packs(packs, opts \\ []) when is_list(packs) and is_list(opts) do
-    Surface.set_capability_packs(packs, opts)
-  end
-
-  @spec subscribe_events(String.t()) :: {:error, map()}
-  def subscribe_events(session_id) when is_binary(session_id) do
-    Surface.subscribe_events(session_id)
   end
 end

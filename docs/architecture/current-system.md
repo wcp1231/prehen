@@ -10,7 +10,6 @@ Prehen is now a local-first Agent Gateway and control plane:
 - one gateway session maps to one local agent process
 - HTTP and Phoenix Channels are the primary client surface
 - the first supported transport is `stdio + JSON Lines`
-- legacy runtime session APIs are intentionally unsupported
 
 ## 1. Layer Overview
 
@@ -53,7 +52,7 @@ Prehen.Gateway.SessionWorker
 
 - public API facade
 - forwards to the gateway-backed client surface
-- exposes gateway-oriented session helpers
+- exposes the current gateway session helpers only
 
 ### 2.2 `Prehen.Client.Surface`
 
@@ -62,7 +61,6 @@ Prehen.Gateway.SessionWorker
 - reads gateway session status
 - stops gateway sessions
 - exposes `run/2` as a gateway-backed CLI compatibility path
-- explicitly rejects removed runtime-era APIs such as resume, replay, list, and subscribe
 
 ### 2.3 `Prehen.Gateway.Router`
 
@@ -141,17 +139,6 @@ Prehen.Gateway.SessionWorker
 - one session maps to one local agent process
 - no persistent session recovery
 - no multi-node routing
-- no old runtime resume/replay/list APIs
 - no tool mediation through Prehen
 
-## 5. What Is Still In The Repo
-
-The old runtime-era modules may still exist on disk, but they are no longer part of the MVP hot path:
-
-- `Prehen.Agent.Runtime`
-- `Prehen.Agent.Session`
-- `Prehen.Workspace.SessionManager`
-- `Prehen.Conversation.Store`
-- legacy event projection and memory paths
-
-New work should follow the gateway path above rather than extending those modules.
+The old runtime-era modules, structured config loader, workspace layout manager, and OpenSpec assets have been removed from the repo. New work should extend the gateway path above rather than reintroducing those layers.

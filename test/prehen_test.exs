@@ -54,20 +54,8 @@ defmodule PrehenTest do
     assert {:error, %{type: :session_status_failed}} = Prehen.session_status(session_id)
   end
 
-  test "runtime-era public APIs fail explicitly in gateway MVP mode" do
-    assert {:error, %{type: :unsupported_api, reason: %{api: :resume_session}}} =
-             Prehen.resume_session("session_1")
-
-    assert {:error, %{type: :unsupported_api, reason: %{api: :list_sessions}}} =
-             Prehen.list_sessions()
-
-    assert {:error, %{type: :unsupported_api, reason: %{api: :replay_session}}} =
-             Prehen.replay_session("session_1")
-
-    assert {:error, %{type: :unsupported_api, reason: %{api: :set_capability_packs}}} =
-             Prehen.set_capability_packs([:local_fs])
-
-    assert {:error, %{type: :unsupported_api, reason: %{api: :subscribe_events}}} =
-             Prehen.subscribe_events("session_1")
+  test "run/2 reports a gateway error for a missing reused session" do
+    assert {:error, %{type: :runtime_failed, reason: {:gateway_session_not_found, "missing"}}} =
+             Prehen.run("say hi", session_id: "missing", timeout_ms: 100)
   end
 end

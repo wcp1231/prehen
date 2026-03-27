@@ -22,12 +22,7 @@ defmodule Prehen.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:jido, "~> 2.0.0-rc.4"},
-      {:jido_action, github: "agentjido/jido_action", branch: "main", override: true, depth: 1},
-      {:jido_ai, github: "agentjido/jido_ai", branch: "main", depth: 1},
-      {:req_llm, github: "agentjido/req_llm", branch: "main", override: true, depth: 1},
       {:jason, "~> 1.4"},
-      {:yaml_elixir, "~> 2.12"},
 
       # Phoenix
       {:phoenix, "~> 1.8"},
