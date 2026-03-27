@@ -18,6 +18,9 @@ defmodule Prehen.Gateway.Router do
     end
   end
 
+  @spec select_agent(keyword()) :: {:ok, struct()} | {:error, term()}
+  def select_agent(opts \\ []), do: route(opts)
+
   defp route_default do
     case Registry.all() do
       [profile | _rest] -> {:ok, profile}

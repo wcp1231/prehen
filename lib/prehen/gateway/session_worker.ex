@@ -8,6 +8,32 @@ defmodule Prehen.Gateway.SessionWorker do
   alias Prehen.Gateway.Router
   alias Prehen.Gateway.SessionRegistry
 
+  def start_session(%Profile{} = profile, opts \\ []) do
+    gateway_session_id = Keyword.get(opts, :gateway_session_id, gen_gateway_session_id())
+
+    child_opts = [
+      gateway_session_id: gateway_session_id,
+      agent_name: profile.name,
+      test_pid: Keyword.get(opts, :test_pid),
+      workspace: Keyword.get(opts, :workspace)
+    ]
+
+    case DynamicSupervisor.start_child(
+           Prehen.Gateway.SessionWorkerSupervisor,
+           {__MODULE__, child_opts}
+         ) do
+      {:ok, worker_pid} ->
+        {:ok,
+         %{
+           worker_pid: worker_pid,
+           gateway_session_id: gateway_session_id
+         }}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts)
   end
@@ -33,6 +59,7 @@ defmodule Prehen.Gateway.SessionWorker do
             {:ok, %{agent_session_id: agent_session_id}} ->
               case SessionRegistry.put(%{
                      gateway_session_id: gateway_session_id,
+                     worker_pid: self(),
                      agent_name: profile.name,
                      agent_session_id: agent_session_id,
                      status: :attached
@@ -182,5 +209,9 @@ defmodule Prehen.Gateway.SessionWorker do
       end
 
     Map.get(map, key) || Map.get(map, atom_key)
+  end
+
+  defp gen_gateway_session_id do
+    "gw_" <> Integer.to_string(System.unique_integer([:positive]))
   end
 end

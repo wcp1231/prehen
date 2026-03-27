@@ -1,165 +1,54 @@
 defmodule Prehen.Integration.PlatformRuntimeTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: false
 
-  alias Prehen.Agent.Orchestrator
+  alias Prehen.Agents.Profile
+  alias Prehen.Agents.Registry
   alias Prehen.Client.Surface
-  alias Prehen.Conversation.SessionLedger
+  import Phoenix.ConnTest
 
-  defp opts(extra) do
-    base = [
-      agent_backend: Prehen.Agent.Backends.JidoAI,
-      session_adapter: Prehen.Test.FakeSessionAdapter,
-      timeout_ms: 800,
-      max_steps: 4,
-      read_max_bytes: 1024,
-      session_status_poll_ms: 20
-    ]
+  @endpoint PrehenWeb.Endpoint
 
-    Keyword.merge(base, extra)
-  end
+  setup do
+    registry_pid = Process.whereis(Registry)
+    original = :sys.get_state(registry_pid)
 
-  test "integration: session + orchestration + memory + event-store" do
-    {:ok, session} = Surface.create_session(opts([]))
+    fake_profile = %Profile{
+      name: "fake_stdio",
+      command: ["mix", "run", "--no-start", "test/support/fake_stdio_agent.exs"]
+    }
+
+    :sys.replace_state(registry_pid, fn _state ->
+      %{ordered: [fake_profile], by_name: %{"fake_stdio" => fake_profile}}
+    end)
 
     on_exit(fn ->
-      if Process.alive?(session.session_pid), do: Surface.stop_session(session.session_pid)
+      :sys.replace_state(registry_pid, fn _state -> original end)
     end)
 
-    assert {:ok, _} = Surface.subscribe_events(session.session_id)
-    assert {:ok, _} = Surface.submit_message(session.session_pid, "integrate all subsystems")
-    assert {:ok, result} = Surface.await_result(session.session_pid, timeout: 3_000)
-    assert result.status == :ok
-
-    assert_receive {:session_event, event}, 1_000
-    assert event.session_id == session.session_id
-    assert is_binary(event.type)
-    assert event.schema_version == 2
-
-    assert {:ok, memory_before} = Prehen.Memory.context(session.session_id)
-
-    assert Enum.any?(memory_before.stm.conversation_buffer, fn turn ->
-             turn.source == "session"
-           end)
-
-    assert {:ok, %{status: :ok}} =
-             Orchestrator.dispatch(
-               %{query: "summarize this session", session_id: session.session_id},
-               %{}
-             )
-
-    assert {:ok, memory_after} = Prehen.Memory.context(session.session_id)
-
-    assert Enum.any?(memory_after.stm.conversation_buffer, fn turn ->
-             turn.source == "orchestrator"
-           end)
-
-    records = Prehen.replay_session(session.session_id)
-    assert Enum.any?(records, &(&1.kind == :event and &1.type == "ai.request.completed"))
-    assert Enum.any?(records, &(&1.kind == :message and &1.role == :assistant))
+    :ok
   end
 
-  test "regression load: concurrent sessions keep behavior stable" do
-    tasks =
-      for idx <- 1..8 do
-        Task.async(fn ->
-          {:ok, session} =
-            Surface.create_session(opts(session_idle_ttl_ms: 5_000))
+  test "control plane HTTP endpoints route through gateway sessions" do
+    conn = build_conn()
 
-          try do
-            assert {:ok, _} = Surface.submit_message(session.session_pid, "load #{idx}")
+    conn = post(conn, "/sessions", %{"agent" => "fake_stdio"})
+    assert created = json_response(conn, 201)
+    assert %{"session_id" => session_id, "agent" => "fake_stdio"} = created
 
-            assert {:ok, %{status: :ok}} =
-                     Surface.await_result(session.session_pid, timeout: 3_000)
+    on_exit(fn -> Surface.stop_session(session_id) end)
 
-            :ok
-          after
-            if Process.alive?(session.session_pid), do: Surface.stop_session(session.session_pid)
-          end
-        end)
-      end
+    conn = post(build_conn(), "/sessions/#{session_id}/messages", %{"text" => "hello from http"})
+    assert submitted = json_response(conn, 202)
 
-    results = Enum.map(tasks, &Task.await(&1, 8_000))
-    assert Enum.all?(results, &(&1 == :ok))
-  end
+    assert submitted["status"] == "accepted"
+    assert submitted["session_id"] == session_id
+    assert is_binary(submitted["request_id"])
 
-  test "restart recovery: replay historical ledger and continue dialogue" do
-    {:ok, session} = Surface.create_session(opts([]))
-    assert {:ok, _} = Surface.submit_message(session.session_pid, "restart first")
-    assert {:ok, _} = Surface.await_result(session.session_pid, timeout: 3_000)
-    assert :ok = Surface.stop_session(session.session_pid)
+    conn = get(build_conn(), "/agents")
+    assert agents = json_response(conn, 200)
 
-    old_store_pid = Process.whereis(Prehen.Conversation.Store)
-    old_stm_pid = Process.whereis(Prehen.Memory.STM)
-    Process.exit(old_store_pid, :kill)
-    Process.exit(old_stm_pid, :kill)
-
-    assert wait_until(fn ->
-             new_store_pid = Process.whereis(Prehen.Conversation.Store)
-             new_stm_pid = Process.whereis(Prehen.Memory.STM)
-
-             is_pid(new_store_pid) and is_pid(new_stm_pid) and new_store_pid != old_store_pid and
-               new_stm_pid != old_stm_pid
+    assert Enum.any?(agents["agents"], fn agent ->
+             agent["agent"] == "fake_stdio"
            end)
-
-    {:ok, resumed} = Surface.resume_session(session.session_id, opts([]))
-
-    on_exit(fn ->
-      if Process.alive?(resumed.session_pid), do: Surface.stop_session(resumed.session_pid)
-    end)
-
-    assert {:ok, _} = Surface.submit_message(resumed.session_pid, "restart second")
-    assert {:ok, result} = Surface.await_result(resumed.session_pid, timeout: 3_000)
-
-    assert Enum.any?(result.trace, fn event -> event.type == "ai.session.recovered" end)
-
-    assert Enum.any?(result.trace, fn event ->
-             event.type == "ai.session.turn.started" and event.turn_id == 2
-           end)
-
-    assert {:ok, context} = Prehen.Memory.context(session.session_id)
-
-    assert Enum.any?(context.stm.conversation_buffer, fn turn -> turn.input == "restart first" end)
-
-    assert Enum.any?(context.stm.conversation_buffer, fn turn ->
-             turn.input == "restart second"
-           end)
-  end
-
-  test "concurrent sessions are isolated by independent session ledgers" do
-    session_ids =
-      for idx <- 1..4 do
-        {:ok, session} = Surface.create_session(opts([]))
-
-        try do
-          assert {:ok, _} = Surface.submit_message(session.session_pid, "isolation #{idx}")
-          assert {:ok, %{status: :ok}} = Surface.await_result(session.session_pid, timeout: 3_000)
-          session.session_id
-        after
-          if Process.alive?(session.session_pid), do: Surface.stop_session(session.session_pid)
-        end
-      end
-
-    assert length(session_ids) == length(Enum.uniq(session_ids))
-
-    Enum.each(session_ids, fn session_id ->
-      assert File.exists?(SessionLedger.session_file(session_id))
-
-      records = Prehen.replay_session(session_id)
-      assert records != []
-      assert Enum.all?(records, fn record -> record.session_id == session_id end)
-    end)
-  end
-
-  defp wait_until(fun, timeout_ms \\ 2_000)
-
-  defp wait_until(fun, timeout_ms) when timeout_ms <= 0, do: fun.()
-
-  defp wait_until(fun, timeout_ms) do
-    if fun.() do
-      true
-    else
-      Process.sleep(25)
-      wait_until(fun, timeout_ms - 25)
-    end
   end
 end

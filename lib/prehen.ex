@@ -28,15 +28,15 @@ defmodule Prehen do
     Surface.resume_session(session_id, opts)
   end
 
-  @spec submit_message(pid(), String.t(), keyword()) :: {:ok, map()} | {:error, map()}
-  def submit_message(session_pid, text, opts \\ [])
-      when is_pid(session_pid) and is_binary(text) do
-    Surface.submit_message(session_pid, text, opts)
+  @spec submit_message(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, map()}
+  def submit_message(session_id, text, opts \\ [])
+      when is_binary(session_id) and is_binary(text) do
+    Surface.submit_message(session_id, text, opts)
   end
 
-  @spec stop_session(pid()) :: :ok | {:error, map()}
-  def stop_session(session_pid) when is_pid(session_pid) do
-    Surface.stop_session(session_pid)
+  @spec stop_session(String.t()) :: :ok | {:error, map()}
+  def stop_session(session_id) when is_binary(session_id) do
+    Surface.stop_session(session_id)
   end
 
   @spec await_result(pid(), keyword()) :: {:ok, map()} | {:error, map()}
@@ -49,9 +49,9 @@ defmodule Prehen do
     Surface.list_sessions(opts)
   end
 
-  @spec session_status(pid()) :: {:ok, map()} | {:error, map()}
-  def session_status(session_pid) when is_pid(session_pid) do
-    Surface.session_status(session_pid)
+  @spec session_status(String.t()) :: {:ok, map()} | {:error, map()}
+  def session_status(session_id) when is_binary(session_id) do
+    Surface.session_status(session_id)
   end
 
   @spec replay_session(String.t(), keyword()) :: [map()]

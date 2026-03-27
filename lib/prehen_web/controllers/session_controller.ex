@@ -2,7 +2,6 @@ defmodule PrehenWeb.SessionController do
   use Phoenix.Controller, formats: [:json]
 
   alias Prehen.Client.Surface
-  alias PrehenWeb.EventSerializer
 
   action_fallback PrehenWeb.FallbackController
 
@@ -12,67 +11,28 @@ defmodule PrehenWeb.SessionController do
     with {:ok, session} <- Surface.create_session(opts) do
       conn
       |> put_status(:created)
-      |> json(%{session_id: session.session_id})
+      |> json(session)
     end
-  end
-
-  def index(conn, _params) do
-    sessions =
-      Surface.list_sessions()
-      |> Enum.map(fn record ->
-        %{
-          session_id: record.session_id,
-          status: record.status,
-          inserted_at_ms: record.inserted_at_ms
-        }
-      end)
-
-    json(conn, %{sessions: sessions})
   end
 
   def show(conn, %{"id" => session_id}) do
-    with {:ok, %{session_pid: pid}} <- Surface.resume_session(session_id),
-         {:ok, status} <- Surface.session_status(pid) do
-      serialized =
-        status
-        |> Map.drop([:pid])
-        |> EventSerializer.serialize()
-
-      json(conn, %{session: serialized})
-    else
-      {:error, %{code: :session_resume_failed}} ->
-        conn |> put_status(:not_found) |> put_view(json: PrehenWeb.ErrorJSON) |> render("404.json")
-
-      {:error, :not_found} ->
-        conn |> put_status(:not_found) |> put_view(json: PrehenWeb.ErrorJSON) |> render("404.json")
-
-      {:error, _reason} = error ->
-        error
-    end
+    with {:ok, status} <- Surface.session_status(session_id), do: json(conn, %{session: status})
   end
 
   def delete(conn, %{"id" => session_id}) do
-    with {:ok, %{session_pid: pid}} <- Surface.resume_session(session_id),
-         :ok <- Surface.stop_session(pid) do
+    with :ok <- Surface.stop_session(session_id) do
       send_resp(conn, :no_content, "")
-    else
-      {:error, %{code: :session_resume_failed}} ->
-        conn |> put_status(:not_found) |> put_view(json: PrehenWeb.ErrorJSON) |> render("404.json")
-
-      {:error, :not_found} ->
-        conn |> put_status(:not_found) |> put_view(json: PrehenWeb.ErrorJSON) |> render("404.json")
-
-      {:error, _reason} = error ->
-        error
     end
   end
 
-  def replay(conn, %{"id" => session_id}) do
-    events =
-      Surface.replay_session(session_id)
-      |> Enum.map(&EventSerializer.serialize/1)
+  def create_message(conn, %{"id" => session_id} = params) do
+    text = Map.get(params, "text") || Map.get(params, "message")
 
-    json(conn, %{events: events})
+    with {:ok, submit} <- Surface.submit_message(session_id, text, kind: :prompt) do
+      conn
+      |> put_status(:accepted)
+      |> json(submit)
+    end
   end
 
   defp build_session_opts(params) do

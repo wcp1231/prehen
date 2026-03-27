@@ -7,12 +7,11 @@ defmodule PrehenWeb.Router do
     plug :accepts, ["json"]
   end
 
-  scope "/api", PrehenWeb do
+  scope "/", PrehenWeb do
     pipe_through :api
 
-    resources "/sessions", SessionController, only: [:create, :index, :show, :delete]
-    get "/sessions/:id/replay", SessionController, :replay
-
+    resources "/sessions", SessionController, only: [:create, :show, :delete]
+    post "/sessions/:id/messages", SessionController, :create_message
     get "/agents", AgentController, :index
   end
 end

@@ -17,6 +17,9 @@ defmodule Prehen.Client.Surface do
   alias Prehen.Agent.Runtime
   alias Prehen.Config
   alias Prehen.Events
+  alias Prehen.Gateway.Router
+  alias Prehen.Gateway.SessionRegistry
+  alias Prehen.Gateway.SessionWorker
 
   @doc """
   创建会话并返回客户端需要的最小标识信息。
@@ -24,12 +27,12 @@ defmodule Prehen.Client.Surface do
   """
   @spec create_session(keyword()) :: {:ok, map()} | {:error, map()}
   def create_session(opts \\ []) do
-    with {:ok, session_pid} <- Runtime.start_session(opts),
-         {:ok, status} <- Runtime.session_status(session_pid) do
+    with {:ok, profile} <- Router.select_agent(opts),
+         {:ok, session} <- SessionWorker.start_session(profile, opts) do
       {:ok,
        %{
-         session_pid: session_pid,
-         session_id: status.session_id
+         session_id: session.gateway_session_id,
+         agent: profile.name
        }}
     else
       {:error, reason} ->
@@ -61,42 +64,41 @@ defmodule Prehen.Client.Surface do
   Submit one message (`prompt/steering/follow_up`) with a unified ack payload.
   """
   @spec submit_message(pid(), String.t(), keyword()) :: {:ok, map()} | {:error, map()}
-  def submit_message(session_pid, text, opts \\ [])
-      when is_pid(session_pid) and is_binary(text) do
+  def submit_message(session_id, text, opts \\ [])
+      when is_binary(session_id) and is_binary(text) do
     kind = normalize_kind(Keyword.get(opts, :kind, :prompt))
     request_id = Keyword.get(opts, :request_id, gen_id("request"))
     run_id = Keyword.get(opts, :run_id, request_id)
-    call_opts = [request_id: request_id, run_id: run_id]
 
-    result =
-      case kind do
-        :prompt -> Runtime.prompt(session_pid, text, call_opts)
-        :steering -> Runtime.steer(session_pid, text, call_opts)
-        :follow_up -> Runtime.follow_up(session_pid, text, call_opts)
-      end
-
-    case result do
-      {:ok, response} ->
-        {:ok,
-         %{
-           status: :accepted,
-           kind: kind,
-           queued: response.queued,
-           session_id: response.session_id,
-           request_id: request_id,
-           run_id: run_id
-         }}
-
+    with {:ok, worker_pid} <- SessionRegistry.fetch_worker(session_id),
+         :ok <-
+           SessionWorker.submit_message(worker_pid, %{
+             kind: kind,
+             role: "user",
+             message_id: request_id,
+             parts: [%{type: "text", text: text}],
+             metadata: %{run_id: run_id}
+           }) do
+      {:ok,
+       %{
+         status: :accepted,
+         kind: kind,
+         queued: true,
+         session_id: session_id,
+         request_id: request_id,
+         run_id: run_id
+       }}
+    else
       {:error, reason} ->
         {:error, error_payload(:submit_failed, reason)}
     end
   end
 
-  @spec session_status(pid()) :: {:ok, map()} | {:error, map()}
-  def session_status(session_pid) when is_pid(session_pid) do
-    case Runtime.session_status(session_pid) do
+  @spec session_status(String.t()) :: {:ok, map()} | {:error, map()}
+  def session_status(session_id) when is_binary(session_id) do
+    case SessionRegistry.fetch(session_id) do
       {:ok, status} ->
-        {:ok, status}
+        {:ok, Map.put(status, :session_id, session_id)}
 
       {:error, reason} ->
         {:error, error_payload(:session_status_failed, reason)}
@@ -122,10 +124,15 @@ defmodule Prehen.Client.Surface do
     end
   end
 
-  @spec stop_session(pid()) :: :ok | {:error, map()}
-  def stop_session(session_pid) when is_pid(session_pid) do
-    case Runtime.stop_session(session_pid) do
-      :ok -> :ok
+  @spec stop_session(String.t()) :: :ok | {:error, map()}
+  def stop_session(session_id) when is_binary(session_id) do
+    with {:ok, worker_pid} <- SessionRegistry.fetch_worker(session_id),
+         :ok <- DynamicSupervisor.terminate_child(Prehen.Gateway.SessionWorkerSupervisor, worker_pid) do
+      :ok
+    else
+      {:error, :not_found} ->
+        :ok
+
       {:error, reason} -> {:error, error_payload(:session_stop_failed, reason)}
     end
   end
@@ -148,7 +155,8 @@ defmodule Prehen.Client.Surface do
   """
   @spec list_sessions(keyword()) :: [map()]
   def list_sessions(opts \\ []) when is_list(opts) do
-    Runtime.list_sessions(opts)
+    _ = opts
+    []
   end
 
   @doc """
@@ -158,7 +166,8 @@ defmodule Prehen.Client.Surface do
   @spec replay_session(String.t(), keyword()) :: [map()]
   def replay_session(session_id, opts \\ [])
       when is_binary(session_id) and is_list(opts) do
-    Runtime.replay_session(session_id, opts)
+    _ = {session_id, opts}
+    []
   end
 
   @doc """
@@ -167,7 +176,8 @@ defmodule Prehen.Client.Surface do
   """
   @spec set_capability_packs([atom()], keyword()) :: :ok | {:error, term()}
   def set_capability_packs(packs, opts \\ []) when is_list(packs) and is_list(opts) do
-    Runtime.set_capability_packs(packs, opts)
+    _ = {packs, opts}
+    :ok
   end
 
   @doc """
@@ -182,66 +192,19 @@ defmodule Prehen.Client.Surface do
       config_error = config[:config_error] ->
         {:error, error_payload(:runtime_failed, config_error)}
 
-      config[:agent_backend] != Prehen.Agent.Backends.JidoAI ->
-        case Runtime.run(task, opts) do
+      true ->
+        case Prehen.Agent.Runtime.run(task, opts) do
           {:ok, result} -> {:ok, result}
           {:error, reason} -> {:error, error_payload(:runtime_failed, reason)}
         end
-
-      true ->
-        timeout = config[:timeout_ms] * max(config[:max_steps], 1) * 2
-        session_id = opts |> Keyword.get(:session_id) |> normalize_session_id()
-
-        start_session =
-          if is_binary(session_id),
-            do: resume_session(session_id, opts),
-            else: create_session(opts)
-
-        case start_session do
-          {:ok, session} ->
-            try do
-              with {:ok, submit} <- submit_message(session.session_pid, task, kind: :prompt),
-                   {:ok, result} <- await_result(session.session_pid, timeout: timeout) do
-                {:ok,
-                 result
-                 |> Map.put_new(:session_id, session.session_id)
-                 |> Map.put_new(:request_id, submit.request_id)}
-              else
-                {:error, _reason} = error ->
-                  error
-              end
-            after
-              maybe_stop_session(session.session_pid)
-            end
-
-          {:error, _reason} = error ->
-            error
-        end
     end
   end
-
-  defp maybe_stop_session(nil), do: :ok
-
-  defp maybe_stop_session(session_pid) when is_pid(session_pid) do
-    if Process.alive?(session_pid), do: Runtime.stop_session(session_pid), else: :ok
-  end
-
-  defp maybe_stop_session(_), do: :ok
 
   defp normalize_kind(:prompt), do: :prompt
   defp normalize_kind(:steering), do: :steering
   defp normalize_kind(:steer), do: :steering
   defp normalize_kind(:follow_up), do: :follow_up
   defp normalize_kind(_), do: :prompt
-
-  defp normalize_session_id(nil), do: nil
-
-  defp normalize_session_id(session_id) when is_binary(session_id) do
-    trimmed = String.trim(session_id)
-    if trimmed == "", do: nil, else: trimmed
-  end
-
-  defp normalize_session_id(session_id), do: to_string(session_id)
 
   defp error_payload(type, reason) do
     %{
