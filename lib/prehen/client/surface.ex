@@ -63,7 +63,7 @@ defmodule Prehen.Client.Surface do
   提交一条用户消息（prompt/steering/follow_up）并返回统一回执。
   Submit one message (`prompt/steering/follow_up`) with a unified ack payload.
   """
-  @spec submit_message(pid(), String.t(), keyword()) :: {:ok, map()} | {:error, map()}
+  @spec submit_message(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, map()}
   def submit_message(session_id, text, opts \\ [])
       when is_binary(session_id) and is_binary(text) do
     kind = normalize_kind(Keyword.get(opts, :kind, :prompt))
@@ -155,8 +155,7 @@ defmodule Prehen.Client.Surface do
   """
   @spec list_sessions(keyword()) :: [map()]
   def list_sessions(opts \\ []) when is_list(opts) do
-    _ = opts
-    []
+    Runtime.list_sessions(opts)
   end
 
   @doc """
@@ -166,8 +165,7 @@ defmodule Prehen.Client.Surface do
   @spec replay_session(String.t(), keyword()) :: [map()]
   def replay_session(session_id, opts \\ [])
       when is_binary(session_id) and is_list(opts) do
-    _ = {session_id, opts}
-    []
+    Runtime.replay_session(session_id, opts)
   end
 
   @doc """
@@ -176,8 +174,7 @@ defmodule Prehen.Client.Surface do
   """
   @spec set_capability_packs([atom()], keyword()) :: :ok | {:error, term()}
   def set_capability_packs(packs, opts \\ []) when is_list(packs) and is_list(opts) do
-    _ = {packs, opts}
-    :ok
+    Runtime.set_capability_packs(packs, opts)
   end
 
   @doc """
@@ -192,19 +189,81 @@ defmodule Prehen.Client.Surface do
       config_error = config[:config_error] ->
         {:error, error_payload(:runtime_failed, config_error)}
 
-      true ->
-        case Prehen.Agent.Runtime.run(task, opts) do
+      config[:agent_backend] != Prehen.Agent.Backends.JidoAI ->
+        case Runtime.run(task, opts) do
           {:ok, result} -> {:ok, result}
           {:error, reason} -> {:error, error_payload(:runtime_failed, reason)}
         end
+
+      true ->
+        timeout = config[:timeout_ms] * max(config[:max_steps], 1) * 2
+        session_id = opts |> Keyword.get(:session_id) |> normalize_session_id()
+
+        start_session =
+          if is_binary(session_id) do
+            with {:ok, session_pid} <- Runtime.resume_session(session_id, opts),
+                 {:ok, status} <- Runtime.session_status(session_pid) do
+              {:ok, %{session_pid: session_pid, session_id: status.session_id}}
+            end
+          else
+            with {:ok, session_pid} <- Runtime.start_session(opts),
+                 {:ok, status} <- Runtime.session_status(session_pid) do
+              {:ok, %{session_pid: session_pid, session_id: status.session_id}}
+            end
+          end
+
+        case start_session do
+          {:ok, session} ->
+            request_id = gen_id("request")
+
+            try do
+              with {:ok, response} <-
+                     Runtime.prompt(session.session_pid, task,
+                       request_id: request_id,
+                       run_id: request_id
+                     ),
+                   {:ok, result} <- await_result(session.session_pid, timeout: timeout) do
+                {:ok,
+                 result
+                 |> Map.put_new(:session_id, session.session_id)
+                 |> Map.put_new(:request_id, request_id)
+                 |> Map.put_new(:queued, response.queued)}
+              else
+                {:error, _reason} = error ->
+                  error
+              end
+            after
+              maybe_stop_session(session.session_pid)
+            end
+
+          {:error, reason} ->
+            {:error, error_payload(:runtime_failed, reason)}
+        end
     end
   end
+
+  defp maybe_stop_session(nil), do: :ok
+
+  defp maybe_stop_session(session_pid) when is_pid(session_pid) do
+    if Process.alive?(session_pid), do: Runtime.stop_session(session_pid), else: :ok
+  end
+
+  defp maybe_stop_session(_), do: :ok
 
   defp normalize_kind(:prompt), do: :prompt
   defp normalize_kind(:steering), do: :steering
   defp normalize_kind(:steer), do: :steering
   defp normalize_kind(:follow_up), do: :follow_up
   defp normalize_kind(_), do: :prompt
+
+  defp normalize_session_id(nil), do: nil
+
+  defp normalize_session_id(session_id) when is_binary(session_id) do
+    trimmed = String.trim(session_id)
+    if trimmed == "", do: nil, else: trimmed
+  end
+
+  defp normalize_session_id(session_id), do: to_string(session_id)
 
   defp error_payload(type, reason) do
     %{
