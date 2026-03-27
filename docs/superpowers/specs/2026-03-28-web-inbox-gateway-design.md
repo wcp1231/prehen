@@ -52,9 +52,9 @@ This design fills that gap without changing the core architectural direction. Pr
 - session list for the current node
 - explicit session creation from the Web UI
 - agent selection at session creation time
-- default agent selection in the UI
+- server-provided default agent selection in the UI
 - session switching in the Web UI
-- minimal in-memory history per live session
+- minimal in-memory history for active and terminal sessions retained in the current node process
 - real-time message submission and event streaming via Phoenix Channel
 - thin session status shown in the UI
 
@@ -100,6 +100,8 @@ The intended first-pass user flow is:
 11. Gateway updates session history projection and streams events to the UI.
 12. User can switch to another session and back without losing in-memory history for still-live sessions.
 
+If a session has already reached a terminal state, the user should still be able to select it from the list and inspect the in-memory history retained by the current node process.
+
 ## 6. Architectural Approach
 
 The recommended implementation is a thin inbox control plane layered on top of the existing Gateway primitives.
@@ -141,7 +143,13 @@ This history is intentionally not:
 - a persistent ledger
 - a replay system
 
-It is only a node-local in-memory projection for active sessions.
+It is only a node-local in-memory projection retained by the current Prehen node process.
+
+Retention rule for the first version:
+
+- active sessions keep in-memory history while running
+- terminal sessions keep their last in-memory history and remain readable until the Prehen node process restarts
+- there is no persistent restore after restart
 
 The history should retain only the UI-relevant record types:
 
@@ -164,6 +172,8 @@ Recommended endpoints:
 - `DELETE /inbox/sessions/:id`
 
 Existing lower-level session endpoints may remain, but the inbox UI should consume inbox-oriented read models instead of assembling control-plane state itself.
+
+For this design, `DELETE /inbox/sessions/:id` means terminate the live session if it is still running and mark it terminal in the inbox projections. It does not remove the session row or its in-memory history from the current process.
 
 ### 7.4 Session Channel
 
@@ -194,7 +204,7 @@ No Channel connection is required until the user selects or creates a session.
 When the user creates a session:
 
 - Web calls `POST /inbox/sessions`
-- Gateway selects the requested or default agent
+- Gateway selects the requested agent or falls back to a server-provided default
 - Gateway launches a local `SessionWorker`
 - transport handshake obtains `agent_session_id`
 - session index receives a new entry
@@ -253,6 +263,12 @@ The UI only needs to answer:
 - is it currently able to receive messages
 - is the agent actively producing output
 - did the session end or fail
+
+Terminal-state rule:
+
+- `stopped` and `crashed` sessions remain visible in the inbox list for the lifetime of the current node process
+- terminal sessions are read-only in the UI
+- terminal sessions keep their last in-memory history available for detail view
 
 ## 10. History Model
 
@@ -335,6 +351,7 @@ Behavior:
 - session stays visible in the list
 - detail pane marks it `stopped` or `crashed`
 - composer is disabled
+- retained in-memory history is still readable if available
 
 ### 12.3 Message Submission Failure
 
@@ -347,6 +364,8 @@ Behavior:
 
 - UI should show an inline error/system note in the selected session timeline
 - error should not be silently swallowed
+
+If the target session is already terminal, the submit path should fail clearly and the UI should keep the session selected in read-only mode.
 
 ### 12.4 Channel Disconnect
 
@@ -365,7 +384,7 @@ The first implementation should cover:
 - history projection records user message and agent output text
 - status projection updates when sessions start or stop
 - session Channel join and submit still function through the inbox flow
-- delete/stop removes live accessibility and updates list state correctly
+- delete/stop removes live accessibility, preserves terminal list visibility, and keeps retained in-memory history readable
 
 ## 14. Frontend Testing Scope
 
@@ -387,7 +406,8 @@ Minimum manual verification should include:
 3. Send a message and verify the agent response streams into the timeline.
 4. Create a second session and switch between them.
 5. Stop one session and confirm the UI shows a terminal state.
-6. Confirm deleted/stopped sessions cannot accept new messages.
+6. Confirm deleted/stopped sessions remain selectable and still show retained history.
+7. Confirm deleted/stopped sessions cannot accept new messages.
 
 ## 16. Implementation Boundary
 
@@ -401,3 +421,119 @@ This design intentionally stops before:
 - agent-managed tool UIs
 
 Those can be added later once the single-node Web message path is stable and operator-friendly.
+
+## 17. Minimal API Contract Appendix
+
+The first implementation should keep the inbox API intentionally small and JSON-first.
+
+### 17.1 `GET /agents`
+
+Response shape:
+
+```json
+{
+  "agents": [
+    {
+      "agent": "fake_stdio",
+      "name": "fake_stdio",
+      "default": true
+    }
+  ]
+}
+```
+
+Default-agent rule for the first version:
+
+- the server should mark one agent as default
+- if no explicit default configuration exists, the first available agent in the ordered registry should be the default
+
+### 17.2 `GET /inbox/sessions`
+
+Response shape:
+
+```json
+{
+  "sessions": [
+    {
+      "session_id": "gw_123",
+      "agent_name": "fake_stdio",
+      "status": "attached",
+      "created_at": 1774625000000,
+      "last_event_at": 1774625001234,
+      "preview": "hi"
+    }
+  ]
+}
+```
+
+### 17.3 `POST /inbox/sessions`
+
+Request shape:
+
+```json
+{
+  "agent": "fake_stdio"
+}
+```
+
+Response shape:
+
+```json
+{
+  "session_id": "gw_123",
+  "agent": "fake_stdio",
+  "status": "attached"
+}
+```
+
+### 17.4 `GET /inbox/sessions/:id`
+
+Response shape:
+
+```json
+{
+  "session": {
+    "session_id": "gw_123",
+    "agent_name": "fake_stdio",
+    "status": "attached",
+    "created_at": 1774625000000,
+    "last_event_at": 1774625001234
+  }
+}
+```
+
+### 17.5 `GET /inbox/sessions/:id/history`
+
+Response shape:
+
+```json
+{
+  "history": [
+    {
+      "id": "msg_1",
+      "session_id": "gw_123",
+      "kind": "user_message",
+      "text": "hello",
+      "timestamp": 1774625000000,
+      "message_id": "request_1"
+    },
+    {
+      "id": "msg_2",
+      "session_id": "gw_123",
+      "kind": "assistant_message",
+      "text": "hi",
+      "timestamp": 1774625000500,
+      "message_id": "request_1"
+    }
+  ]
+}
+```
+
+### 17.6 `DELETE /inbox/sessions/:id`
+
+Behavior:
+
+- if the session is live, terminate it
+- if the session is already terminal, return success without changing retention semantics
+- keep the session visible in the inbox list with terminal status
+- keep retained in-memory history readable until node restart
