@@ -10,8 +10,8 @@ defmodule Prehen.Agents.Envelope do
       node: Atom.to_string(node()),
       seq: Map.fetch!(attrs, :seq),
       timestamp: System.system_time(:millisecond),
-      payload: Map.get(attrs, :payload, %{}),
-      metadata: Map.get(attrs, :metadata, %{})
+      payload: Map.get(attrs, :payload) || %{},
+      metadata: Map.get(attrs, :metadata) || %{}
     }
   end
 end
