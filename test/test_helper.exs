@@ -280,6 +280,26 @@ defmodule Prehen.Test.FakeSessionAdapter do
   end
 end
 
+defmodule PrehenWeb.ChannelCase do
+  use ExUnit.CaseTemplate
+
+  using do
+    quote do
+      use ExUnit.Case, async: false
+      import Phoenix.ChannelTest
+      alias PrehenWeb.Endpoint
+
+      @endpoint PrehenWeb.Endpoint
+    end
+  end
+end
+
+unless Code.ensure_loaded?(Prehen.Agents.Profile) do
+  defmodule Prehen.Agents.Profile do
+    defstruct [:name, :command]
+  end
+end
+
 workspace_dir =
   Path.join(System.tmp_dir!(), "prehen_test_workspace_#{System.unique_integer([:positive])}")
 
