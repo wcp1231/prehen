@@ -51,4 +51,33 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
              agent["agent"] == "fake_stdio"
            end)
   end
+
+  test "GET /sessions/:id returns JSON-safe gateway status without worker pid" do
+    conn = post(build_conn(), "/sessions", %{"agent" => "fake_stdio"})
+    assert %{"session_id" => session_id} = json_response(conn, 201)
+
+    on_exit(fn -> Surface.stop_session(session_id) end)
+
+    conn = get(build_conn(), "/sessions/#{session_id}")
+    assert %{"session" => session} = json_response(conn, 200)
+
+    assert session["session_id"] == session_id
+    assert session["status"] == "attached"
+    refute Map.has_key?(session, "worker_pid")
+  end
+
+  test "POST /sessions/:id/messages returns 400 when message text is missing" do
+    conn = post(build_conn(), "/sessions", %{"agent" => "fake_stdio"})
+    assert %{"session_id" => session_id} = json_response(conn, 201)
+
+    on_exit(fn -> Surface.stop_session(session_id) end)
+
+    conn = post(build_conn(), "/sessions/#{session_id}/messages", %{})
+    assert %{"error" => %{"type" => "bad_request"}} = json_response(conn, 400)
+  end
+
+  test "DELETE /sessions/:id returns 404 for unknown session" do
+    conn = delete(build_conn(), "/sessions/missing_session")
+    assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
+  end
 end

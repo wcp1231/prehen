@@ -98,7 +98,13 @@ defmodule Prehen.Client.Surface do
   def session_status(session_id) when is_binary(session_id) do
     case SessionRegistry.fetch(session_id) do
       {:ok, status} ->
-        {:ok, Map.put(status, :session_id, session_id)}
+        sanitized =
+          status
+          |> Enum.reject(fn {_key, value} -> is_pid(value) end)
+          |> Map.new()
+          |> Map.put(:session_id, session_id)
+
+        {:ok, sanitized}
 
       {:error, reason} ->
         {:error, error_payload(:session_status_failed, reason)}
@@ -131,7 +137,7 @@ defmodule Prehen.Client.Surface do
       :ok
     else
       {:error, :not_found} ->
-        :ok
+        {:error, error_payload(:session_stop_failed, :not_found)}
 
       {:error, reason} -> {:error, error_payload(:session_stop_failed, reason)}
     end

@@ -28,7 +28,8 @@ defmodule PrehenWeb.SessionController do
   def create_message(conn, %{"id" => session_id} = params) do
     text = Map.get(params, "text") || Map.get(params, "message")
 
-    with {:ok, submit} <- Surface.submit_message(session_id, text, kind: :prompt) do
+    with {:ok, normalized_text} <- normalize_message_text(text),
+         {:ok, submit} <- Surface.submit_message(session_id, normalized_text, kind: :prompt) do
       conn
       |> put_status(:accepted)
       |> json(submit)
@@ -46,4 +47,13 @@ defmodule PrehenWeb.SessionController do
 
     opts
   end
+
+  defp normalize_message_text(text) when is_binary(text) do
+    case String.trim(text) do
+      "" -> {:error, :bad_request}
+      normalized -> {:ok, normalized}
+    end
+  end
+
+  defp normalize_message_text(_), do: {:error, :bad_request}
 end
