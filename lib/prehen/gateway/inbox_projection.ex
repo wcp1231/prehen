@@ -32,13 +32,13 @@ defmodule Prehen.Gateway.InboxProjection do
   @spec list_sessions() :: [session_row()]
   def list_sessions, do: GenServer.call(__MODULE__, :list_sessions)
 
-  @spec session_started(map()) :: :ok
+  @spec session_started(map()) :: :ok | {:error, :invalid_attrs}
   def session_started(attrs), do: GenServer.call(__MODULE__, {:session_started, attrs})
 
-  @spec user_message(map()) :: :ok | {:error, :not_found}
+  @spec user_message(map()) :: :ok | {:error, :invalid_attrs | :not_found}
   def user_message(attrs), do: GenServer.call(__MODULE__, {:user_message, attrs})
 
-  @spec agent_delta(map()) :: :ok | {:error, :not_found}
+  @spec agent_delta(map()) :: :ok | {:error, :invalid_attrs | :not_found}
   def agent_delta(attrs), do: GenServer.call(__MODULE__, {:agent_delta, attrs})
 
   @spec fetch_session(String.t()) :: {:ok, session_row()} | {:error, :not_found}
@@ -63,81 +63,88 @@ defmodule Prehen.Gateway.InboxProjection do
   end
 
   def handle_call({:session_started, attrs}, _from, state) do
-    session_id = Map.fetch!(attrs, :session_id)
+    with {:ok, session_id} <- fetch_required_binary(attrs, :session_id) do
+      case Map.has_key?(state.sessions, session_id) do
+        true ->
+          {:reply, :ok, state}
 
-    case Map.has_key?(state.sessions, session_id) do
-      true ->
-        {:reply, :ok, state}
+        false ->
+          created_at = Map.get(attrs, :created_at)
 
-      false ->
-        created_at = Map.get(attrs, :created_at)
+          row = %{
+            session_id: session_id,
+            agent_name: Map.get(attrs, :agent_name),
+            status: :attached,
+            created_at: created_at,
+            last_event_at: created_at,
+            preview: nil
+          }
 
-        row = %{
-          session_id: session_id,
-          agent_name: Map.get(attrs, :agent_name),
-          status: :attached,
-          created_at: created_at,
-          last_event_at: created_at,
-          preview: nil
-        }
+          next_state =
+            state
+            |> put_session(row)
+            |> ensure_history(session_id)
 
-        next_state =
-          state
-          |> put_session(row)
-          |> ensure_history(session_id)
-
-        {:reply, :ok, next_state}
+          {:reply, :ok, next_state}
+      end
+    else
+      :error -> {:reply, {:error, :invalid_attrs}, state}
     end
   end
 
   def handle_call({:user_message, attrs}, _from, state) do
-    session_id = Map.fetch!(attrs, :session_id)
+    with {:ok, session_id} <- fetch_required_binary(attrs, :session_id),
+         {:ok, message_id} <- fetch_required_binary(attrs, :message_id) do
+      case Map.has_key?(state.sessions, session_id) do
+        false ->
+          {:reply, {:error, :not_found}, state}
 
-    case Map.has_key?(state.sessions, session_id) do
-      false ->
-        {:reply, {:error, :not_found}, state}
+        true ->
+          {timestamp, next_state} = next_timestamp(state, session_id)
 
-      true ->
-        {timestamp, next_state} = next_timestamp(state, session_id)
+          entry = %{
+            id: next_history_id(),
+            kind: :user_message,
+            session_id: session_id,
+            message_id: message_id,
+            text: Map.get(attrs, :text, ""),
+            timestamp: timestamp
+          }
 
-        entry = %{
-          id: next_history_id(),
-          kind: :user_message,
-          session_id: session_id,
-          message_id: Map.fetch!(attrs, :message_id),
-          text: Map.get(attrs, :text, ""),
-          timestamp: timestamp
-        }
+          next_state =
+            next_state
+            |> ensure_history(session_id)
+            |> append_history(session_id, entry)
+            |> update_session_row(session_id, entry)
 
-        next_state =
-          next_state
-          |> ensure_history(session_id)
-          |> append_history(session_id, entry)
-          |> update_session_row(session_id, entry)
-
-        {:reply, :ok, next_state}
+          {:reply, :ok, next_state}
+      end
+    else
+      :error -> {:reply, {:error, :invalid_attrs}, state}
     end
   end
 
   def handle_call({:agent_delta, attrs}, _from, state) do
-    session_id = Map.fetch!(attrs, :session_id)
+    with {:ok, session_id} <- fetch_required_binary(attrs, :session_id),
+         {:ok, message_id} <- fetch_required_binary(attrs, :message_id) do
+      case Map.has_key?(state.sessions, session_id) do
+        false ->
+          {:reply, {:error, :not_found}, state}
 
-    case Map.has_key?(state.sessions, session_id) do
-      false ->
-        {:reply, {:error, :not_found}, state}
+        true ->
+          text = Map.get(attrs, :text, "")
+          {timestamp, next_state} = next_timestamp(state, session_id)
 
-      true ->
-        message_id = Map.fetch!(attrs, :message_id)
-        text = Map.get(attrs, :text, "")
-        {timestamp, next_state} = next_timestamp(state, session_id)
+          next_state =
+            next_state
+            |> ensure_history(session_id)
+            |> merge_assistant_delta(session_id, message_id, text, timestamp)
+            |> update_session_from_latest_history(session_id)
 
-        next_state =
-          next_state
-          |> ensure_history(session_id)
-          |> merge_assistant_delta(session_id, message_id, text, timestamp)
-          |> update_session_from_latest_history(session_id)
-
-        {:reply, :ok, next_state}
+          {:reply, :ok, next_state}
+      end
+    else
+      :error -> {:reply, {:error, :invalid_attrs}, state}
     end
   end
 
@@ -222,4 +229,13 @@ defmodule Prehen.Gateway.InboxProjection do
     |> Integer.to_string()
     |> then(&("history_" <> &1))
   end
+
+  defp fetch_required_binary(attrs, key) when is_map(attrs) do
+    case Map.fetch(attrs, key) do
+      {:ok, value} when is_binary(value) -> {:ok, value}
+      _ -> :error
+    end
+  end
+
+  defp fetch_required_binary(_attrs, _key), do: :error
 end

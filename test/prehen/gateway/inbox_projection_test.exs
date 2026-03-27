@@ -197,4 +197,40 @@ defmodule Prehen.Gateway.InboxProjectionTest do
     assert {:error, :not_found} = InboxProjection.fetch_history("gw_missing")
     assert [] = InboxProjection.list_sessions()
   end
+
+  test "malformed attrs return invalid_attrs and preserve retained state" do
+    assert :ok =
+             InboxProjection.session_started(%{
+               session_id: "gw_retained",
+               agent_name: "fake_stdio",
+               created_at: 1_774_625_000_000
+             })
+
+    assert :ok =
+             InboxProjection.user_message(%{
+               session_id: "gw_retained",
+               message_id: "request_retained",
+               text: "hello"
+             })
+
+    assert {:ok, original_row} = InboxProjection.fetch_session("gw_retained")
+    assert {:ok, original_history} = InboxProjection.fetch_history("gw_retained")
+
+    assert {:error, :invalid_attrs} = InboxProjection.session_started(%{agent_name: "broken"})
+
+    assert {:error, :invalid_attrs} =
+             InboxProjection.user_message(%{"session_id" => "gw_retained"})
+
+    assert {:error, :invalid_attrs} =
+             InboxProjection.agent_delta(%{
+               session_id: "gw_retained",
+               text: "hi"
+             })
+
+    assert {:ok, row} = InboxProjection.fetch_session("gw_retained")
+    assert {:ok, history} = InboxProjection.fetch_history("gw_retained")
+
+    assert row == original_row
+    assert history == original_history
+  end
 end
