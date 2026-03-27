@@ -71,4 +71,47 @@ defmodule PrehenWeb.SessionChannelTest do
              socket(PrehenWeb.UserSocket)
              |> subscribe_and_join(PrehenWeb.SessionChannel, "session:missing")
   end
+
+  test "fails attach when registry route points to a dead worker" do
+    worker_pid = spawn(fn -> :ok end)
+    ref = Process.monitor(worker_pid)
+    assert_receive {:DOWN, ^ref, :process, ^worker_pid, _reason}, 1_000
+
+    :ok =
+      SessionRegistry.put(%{
+        gateway_session_id: "gw_dead",
+        worker_pid: worker_pid,
+        agent_name: "fake_stdio",
+        agent_session_id: "agent_gw_dead",
+        status: :attached
+      })
+
+    assert {:error, %{"reason" => "session_not_found"}} =
+             socket(PrehenWeb.UserSocket)
+             |> subscribe_and_join(PrehenWeb.SessionChannel, "session:gw_dead")
+  end
+
+  test "pushes a terminal event when monitored worker goes down" do
+    worker_pid = spawn(fn -> receive do :stop -> :ok end end)
+
+    :ok =
+      SessionRegistry.put(%{
+        gateway_session_id: "gw_down",
+        worker_pid: worker_pid,
+        agent_name: "fake_stdio",
+        agent_session_id: "agent_gw_down",
+        status: :attached
+      })
+
+    {:ok, _, _socket} =
+      socket(PrehenWeb.UserSocket)
+      |> subscribe_and_join(PrehenWeb.SessionChannel, "session:gw_down")
+
+    Process.exit(worker_pid, :kill)
+
+    assert_push "event", %{
+      "type" => "session.crashed",
+      "session_id" => "gw_down"
+    }
+  end
 end

@@ -13,6 +13,10 @@ defmodule PrehenWeb.EventSerializer do
 
   @spec serialize(map()) :: map()
   def serialize(event) when is_map(event) do
+    do_serialize(event, true)
+  end
+
+  defp do_serialize(event, top_level?) when is_map(event) do
     is_request_failed = match?(%{type: "ai.request.failed"}, event) or
                         match?(%{"type" => "ai.request.failed"}, event)
 
@@ -22,7 +26,7 @@ defmodule PrehenWeb.EventSerializer do
 
       converted =
         cond do
-          runtime_specific_field?(str_key) ->
+          top_level? and runtime_specific_field?(str_key) ->
             :drop
 
           is_request_failed and str_key == "error" ->
@@ -56,7 +60,7 @@ defmodule PrehenWeb.EventSerializer do
   defp convert_value(value) when is_atom(value) and not is_boolean(value) and not is_nil(value),
     do: Atom.to_string(value)
 
-  defp convert_value(value) when is_map(value), do: serialize(value)
+  defp convert_value(value) when is_map(value), do: do_serialize(value, false)
 
   defp convert_value(value) when is_list(value),
     do: Enum.flat_map(value, fn item ->

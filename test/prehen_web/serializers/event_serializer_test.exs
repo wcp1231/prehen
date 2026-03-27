@@ -236,5 +236,28 @@ defmodule PrehenWeb.EventSerializerTest do
       refute Map.has_key?(result, "node")
       refute Map.has_key?(result, "timestamp")
     end
+
+    test "preserves nested payload metadata fields while dropping top-level gateway runtime fields" do
+      event = %{
+        type: "session.output.delta",
+        gateway_session_id: "gw_1",
+        agent_session_id: "agent_gw_1",
+        agent: "fake_stdio",
+        node: "nonode@nohost",
+        timestamp: 1_708_915_200_000,
+        seq: 1,
+        payload: %{"node" => "inner-node", "timestamp" => 123, "text" => "hel"},
+        metadata: %{"node" => "meta-node", "timestamp" => 456}
+      }
+
+      result = EventSerializer.serialize(event)
+
+      refute Map.has_key?(result, "node")
+      refute Map.has_key?(result, "timestamp")
+      assert result["payload"]["node"] == "inner-node"
+      assert result["payload"]["timestamp"] == 123
+      assert result["metadata"]["node"] == "meta-node"
+      assert result["metadata"]["timestamp"] == 456
+    end
   end
 end

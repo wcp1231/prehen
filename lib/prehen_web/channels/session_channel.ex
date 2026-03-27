@@ -7,10 +7,18 @@ defmodule PrehenWeb.SessionChannel do
 
   @impl true
   def join("session:" <> session_id, _params, socket) do
-    case SessionRegistry.fetch(session_id) do
-      {:ok, _session} ->
+    case SessionRegistry.fetch_worker(session_id) do
+      {:ok, worker_pid} ->
         :ok = Phoenix.PubSub.subscribe(Prehen.PubSub, "session:#{session_id}")
-        {:ok, %{"session_id" => session_id}, assign(socket, :session_id, session_id)}
+        monitor_ref = Process.monitor(worker_pid)
+
+        socket =
+          socket
+          |> assign(:session_id, session_id)
+          |> assign(:worker_pid, worker_pid)
+          |> assign(:monitor_ref, monitor_ref)
+
+        {:ok, %{"session_id" => session_id}, socket}
 
       {:error, :not_found} ->
         {:error, %{"reason" => "session_not_found"}}
@@ -43,10 +51,34 @@ defmodule PrehenWeb.SessionChannel do
     {:noreply, socket}
   end
 
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{assigns: %{monitor_ref: ref}} = socket) do
+    event_type =
+      case reason do
+        :normal -> "session.ended"
+        :shutdown -> "session.ended"
+        {:shutdown, _} -> "session.ended"
+        _ -> "session.crashed"
+      end
+
+    push(socket, "event", %{
+      "type" => event_type,
+      "session_id" => socket.assigns.session_id,
+      "reason" => inspect(reason)
+    })
+
+    {:stop, :normal, socket}
+  end
+
   def handle_info(_msg, socket), do: {:noreply, socket}
 
   @impl true
-  def terminate(_reason, _socket), do: :ok
+  def terminate(_reason, socket) do
+    if ref = socket.assigns[:monitor_ref] do
+      Process.demonitor(ref, [:flush])
+    end
+
+    :ok
+  end
 
   defp normalize_kind("prompt"), do: :prompt
   defp normalize_kind("steering"), do: :steering
