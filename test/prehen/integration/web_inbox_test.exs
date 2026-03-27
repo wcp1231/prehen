@@ -8,8 +8,7 @@ defmodule Prehen.Integration.WebInboxTest do
   test "lists sessions for the inbox page" do
     conn = get(build_conn(), "/inbox/sessions")
 
-    assert %{"sessions" => sessions} = json_response(conn, 200)
-    assert is_list(sessions)
+    assert %{"sessions" => []} = json_response(conn, 200)
   end
 
   test "lists agents for the inbox page" do
@@ -17,5 +16,14 @@ defmodule Prehen.Integration.WebInboxTest do
 
     assert %{"agents" => agents} = json_response(conn, 200)
     assert is_list(agents)
+
+    case agents do
+      [] ->
+        :ok
+
+      [first | _] ->
+        assert Map.has_key?(first, "agent")
+        assert Map.has_key?(first, "name")
+    end
   end
 end

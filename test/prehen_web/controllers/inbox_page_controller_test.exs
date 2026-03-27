@@ -11,6 +11,6 @@ defmodule PrehenWeb.InboxPageControllerTest do
 
     assert body =~ "Prehen Inbox"
     assert body =~ "data-role=\"session-list\""
-    assert body =~ "/inbox.js"
+    assert body =~ ~s(<script src="/inbox.js")
   end
 end
