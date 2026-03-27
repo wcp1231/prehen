@@ -12,6 +12,7 @@ defmodule Prehen.Gateway.Supervisor do
     children = [
       {Prehen.Agents.Registry, [profiles: Keyword.get(opts, :agent_profiles, [])]},
       {Prehen.Gateway.SessionRegistry, []},
+      {Prehen.Gateway.InboxProjection, []},
       {DynamicSupervisor, strategy: :one_for_one, name: Prehen.Gateway.SessionWorkerSupervisor}
     ]
 

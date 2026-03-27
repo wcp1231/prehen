@@ -33,10 +33,24 @@ defmodule Prehen.Gateway.InboxProjectionTest do
     assert {:ok, row} = InboxProjection.fetch_session("gw_inbox_1")
     assert row.session_id == "gw_inbox_1"
     assert row.agent_name == "fake_stdio"
+    assert row.status == :attached
     assert row.created_at == 1_774_625_000_000
+    assert row.last_event_at == 1_774_625_000_000
     assert row.preview == "hi"
 
+    assert [
+             %{
+               session_id: "gw_inbox_1",
+               agent_name: "fake_stdio",
+               status: :attached,
+               created_at: 1_774_625_000_000,
+               last_event_at: 1_774_625_000_000,
+               preview: "hi"
+             }
+           ] = InboxProjection.list_sessions()
+
     assert {:ok, history} = InboxProjection.fetch_history("gw_inbox_1")
+
     assert [
              %{
                kind: :user_message,
