@@ -4,7 +4,7 @@
 
 **Goal:** Extend the single-node gateway MVP so an entry Prehen node can route sessions to a healthy remote Prehen node and keep sticky client routing across the cluster.
 
-**Architecture:** Keep agent execution local to the target node and move only gateway routing across nodes. Introduce a cluster-visible node registry, a cluster router that picks a target node, and a thin remote-session adapter that lets the entry node create, message, and stop a worker running on another Prehen node.
+**Architecture:** Keep agent execution local to the target node and move only gateway routing across nodes. Split entry-node route state from target-node worker lookup, add a cluster-visible node registry, and introduce explicit remote session control and event relay modules keyed by `gateway_session_id`.
 
 **Tech Stack:** Elixir 1.19, OTP distribution, Phoenix 1.8, ExUnit, stdio JSON Lines transport, RPC / node messaging
 
@@ -17,8 +17,10 @@ This plan intentionally covers only:
 - remote node selection
 - remote session launch
 - sticky route ledger on the entry node
+- target-node local worker lookup
 - node health and capacity snapshots
 - remote message and event forwarding
+- route-aware channel attach and failure signaling
 
 It does not cover:
 
@@ -32,19 +34,23 @@ It does not cover:
 ### New files
 
 - `lib/prehen/gateway/node_registry.ex`
-  Cluster-visible node snapshot registry with TTL/expiry.
+  Cluster-visible node snapshot registry with TTL and health evaluation.
 - `lib/prehen/gateway/cluster_router.ex`
   Selects the target node for a requested agent.
+- `lib/prehen/gateway/local_session_index.ex`
+  Target-node worker lookup keyed by `gateway_session_id`.
 - `lib/prehen/gateway/cluster_session.ex`
-  Entry-node side remote session adapter for create/message/stop.
+  Entry-node side remote session adapter for create, submit, status, and stop.
 - `lib/prehen/gateway/local_launcher.ex`
-  Target-node API for launching and managing local workers on behalf of other nodes.
+  Target-node API for launching and managing local workers by `gateway_session_id`.
+- `lib/prehen/gateway/cluster_event_relay.ex`
+  Target-side relay that forwards normalized envelopes back to the entry node.
 - `test/prehen/gateway/node_registry_test.exs`
-  Covers snapshot publish, merge, fetch, and expiry.
+  Covers snapshot publish, merge, fetch, expiry, and healthy-node evaluation.
 - `test/prehen/gateway/cluster_router_test.exs`
   Covers routing policy and capacity-aware selection.
 - `test/prehen/gateway/cluster_session_test.exs`
-  Covers remote launch, submit, stop, and remote event forwarding.
+  Covers remote launch, submit, status, stop, and remote event forwarding.
 - `test/support/cluster_test_node.exs`
   Boots a lightweight slave node for remote gateway integration tests.
 
@@ -53,32 +59,36 @@ It does not cover:
 - `lib/prehen/application.ex`
   Health reporting for node-registry and cluster routing.
 - `lib/prehen/gateway/supervisor.ex`
-  Start node-registry and cluster session support processes.
+  Start node-registry, local-session-index, and cluster support processes.
 - `lib/prehen/gateway/router.ex`
-  Split local-only route logic from cluster-aware route decisions.
+  Reduce to a compatibility layer around cluster-aware routing.
 - `lib/prehen/gateway/session_registry.ex`
-  Expand route records to store `entry_node`, `target_node`, remote worker handle, and status.
+  Evolve into an entry-node sticky route ledger only.
 - `lib/prehen/gateway/session_worker.ex`
-  Emit route-aware events without absorbing cluster routing logic.
+  Stay local-worker focused while publishing normalized events for relay.
 - `lib/prehen/client/surface.ex`
-  Create, submit, status, and stop through the cluster-aware routing path.
+  Create, submit, status, and stop through the route-aware cluster path.
 - `lib/prehen_web/controllers/session_controller.ex`
-  Return node-aware session status.
+  Return node-aware session status and route failure semantics.
 - `lib/prehen_web/controllers/agent_controller.ex`
-  Optionally expose cluster-visible availability data.
+  Expose cluster-visible availability data if kept in scope.
 - `lib/prehen_web/channels/session_channel.ex`
-  Continue streaming entry-node events for remote sessions.
+  Attach against route state instead of requiring a local worker pid.
+- `lib/prehen_web/serializers/event_serializer.ex`
+  Preserve route-oriented event fields for remote sessions.
 - `test/prehen/client/surface_test.exs`
   Add remote-route coverage.
 - `test/prehen/integration/platform_runtime_test.exs`
   Add entry-node to remote-node integration assertions.
+- `test/prehen_web/channels/session_channel_test.exs`
+  Add remote route attach and failure-event coverage.
 
 ### Files likely to get follow-up cleanup later
 
 - `lib/prehen/gateway/router.ex`
-  May become a thin compatibility wrapper around `ClusterRouter`.
-- `lib/prehen/gateway/session_registry.ex`
-  May later split into local route state and cluster route ledger.
+  May later collapse into `ClusterRouter`.
+- `lib/prehen_web/controllers/agent_controller.ex`
+  May later split `/agents` and `/nodes` introspection if the response grows.
 
 ## Task 1: Lock the Multi-Node Routing Contract in Tests
 
@@ -88,6 +98,7 @@ It does not cover:
 - Create: `test/prehen/gateway/cluster_session_test.exs`
 - Create: `test/support/cluster_test_node.exs`
 - Modify: `test/prehen/integration/platform_runtime_test.exs`
+- Modify: `test/prehen_web/channels/session_channel_test.exs`
 
 - [ ] **Step 1: Write the failing node-registry test**
 
@@ -132,40 +143,7 @@ Run: `mix test test/prehen/gateway/node_registry_test.exs`
 
 Expected: FAIL because `Prehen.Gateway.NodeRegistry` does not exist yet.
 
-- [ ] **Step 3: Write the failing cluster-router test**
-
-```elixir
-defmodule Prehen.Gateway.ClusterRouterTest do
-  use ExUnit.Case, async: false
-
-  alias Prehen.Gateway.ClusterRouter
-  alias Prehen.Gateway.NodeRegistry
-
-  test "prefers the local node when it supports the agent and has capacity" do
-    :ok =
-      NodeRegistry.put_local_snapshot(%{
-        node: node(),
-        status: :up,
-        agent_names: ["fake_stdio"],
-        active_session_count: 0,
-        session_capacity: 2
-      })
-
-    assert {:ok, %{target_node: target_node, agent: "fake_stdio"}} =
-             ClusterRouter.route(agent: "fake_stdio")
-
-    assert target_node == node()
-  end
-end
-```
-
-- [ ] **Step 4: Run the cluster-router test to verify it fails**
-
-Run: `mix test test/prehen/gateway/cluster_router_test.exs`
-
-Expected: FAIL because cluster-aware route selection is not implemented yet.
-
-- [ ] **Step 5: Write the failing remote-session integration test**
+- [ ] **Step 3: Write the failing remote-session integration test**
 
 ```elixir
 defmodule Prehen.Gateway.ClusterSessionTest do
@@ -175,59 +153,154 @@ defmodule Prehen.Gateway.ClusterSessionTest do
 
   test "entry node can route a session to a remote node and receive output locally" do
     {:ok, remote_node} = Prehen.TestSupport.ClusterTestNode.start_link()
+    :ok = Phoenix.PubSub.subscribe(Prehen.PubSub, "session:gw_remote_test")
 
     assert {:ok, %{session_id: session_id}} =
-             Surface.create_session(agent: "fake_stdio", target_node: remote_node)
+             Surface.create_session(
+               agent: "fake_stdio",
+               gateway_session_id: "gw_remote_test",
+               test_target_node: remote_node
+             )
 
     assert {:ok, %{status: :accepted}} = Surface.submit_message(session_id, "hello")
 
-    assert_receive {:gateway_event, %{type: "session.output.delta"}}, 2_000
+    assert_receive {:gateway_event, %{type: "session.output.delta", gateway_session_id: ^session_id}},
+                   2_000
   end
 end
 ```
 
-- [ ] **Step 6: Run the remote-session test to verify it fails**
+- [ ] **Step 4: Run the remote-session test to verify it fails**
 
 Run: `mix test test/prehen/gateway/cluster_session_test.exs`
 
 Expected: FAIL because remote launch and cross-node forwarding are not implemented.
 
-- [ ] **Step 7: Commit the routing contract tests**
+- [ ] **Step 5: Write the failing remote channel attach test**
 
-```bash
-git add test/prehen/gateway/node_registry_test.exs test/prehen/gateway/cluster_router_test.exs test/prehen/gateway/cluster_session_test.exs test/support/cluster_test_node.exs test/prehen/integration/platform_runtime_test.exs
-git commit -m "test: lock multi-node gateway routing contract"
+Add to `test/prehen_web/channels/session_channel_test.exs`:
+
+```elixir
+test "joins a remote-routed session from the entry node and receives route failure events" do
+  {:ok, remote_node} = Prehen.TestSupport.ClusterTestNode.start_link()
+
+  assert {:ok, %{session_id: session_id}} =
+           Prehen.Client.Surface.create_session(
+             agent: "fake_stdio",
+             gateway_session_id: "gw_channel_remote",
+             test_target_node: remote_node
+           )
+
+  assert {:ok, _, socket} =
+           socket(PrehenWeb.UserSocket)
+           |> subscribe_and_join(PrehenWeb.SessionChannel, "session:#{session_id}")
+
+  push(socket, "simulate_route_failure", %{})
+  assert_push "event", %{"type" => "route.failed", "session_id" => ^session_id}
+end
 ```
 
-## Task 2: Introduce the Cluster Node Registry
+- [ ] **Step 6: Run the channel test to verify it fails**
+
+Run: `mix test test/prehen_web/channels/session_channel_test.exs`
+
+Expected: FAIL because channel join still depends on local worker-pid lookup and has no remote failure signaling.
+
+- [ ] **Step 7: Do not commit yet**
+
+Carry these failing tests into Task 2 so the first multi-node routing commit can stay green.
+
+## Task 2: Separate Entry-Node Route State from Target-Node Worker Lookup
+
+**Files:**
+- Create: `lib/prehen/gateway/local_session_index.ex`
+- Create: `lib/prehen/gateway/local_launcher.ex`
+- Modify: `lib/prehen/gateway/session_registry.ex`
+- Modify: `lib/prehen/client/surface.ex`
+- Modify: `lib/prehen_web/channels/session_channel.ex`
+- Test: `test/prehen/client/surface_test.exs`
+- Test: `test/prehen_web/channels/session_channel_test.exs`
+- Test: `test/prehen/gateway/cluster_session_test.exs`
+
+- [ ] **Step 1: Write the failing route-ledger test**
+
+Add to `test/prehen/client/surface_test.exs`:
+
+```elixir
+test "session_status resolves through route records instead of local worker pid lookup" do
+  assert {:ok, %{session_id: session_id}} =
+           Surface.create_session(agent: "fake_stdio")
+
+  assert {:ok, status} = Surface.session_status(session_id)
+  assert status.entry_node == node()
+  assert status.target_node == node()
+end
+```
+
+- [ ] **Step 2: Run the route-ledger test to verify it fails**
+
+Run: `mix test test/prehen/client/surface_test.exs test/prehen_web/channels/session_channel_test.exs`
+
+Expected: FAIL because current status and channel join still depend on local worker state.
+
+- [ ] **Step 3: Introduce `LocalSessionIndex` and narrow `SessionRegistry` to route state**
+
+```elixir
+defmodule Prehen.Gateway.LocalSessionIndex do
+  use GenServer
+
+  def put(gateway_session_id, worker_pid), do: GenServer.call(__MODULE__, {:put, gateway_session_id, worker_pid})
+  def fetch(gateway_session_id), do: GenServer.call(__MODULE__, {:fetch, gateway_session_id})
+  def delete(gateway_session_id), do: GenServer.call(__MODULE__, {:delete, gateway_session_id})
+end
+```
+
+Route records should use a stable shape:
+
+```elixir
+%{
+  gateway_session_id: gateway_session_id,
+  entry_node: entry_node,
+  target_node: target_node,
+  agent_name: agent_name,
+  agent_session_id: agent_session_id,
+  mode: :local | :remote,
+  status: :attached | :detached | :failed
+}
+```
+
+- [ ] **Step 4: Change `SessionChannel.join/3` to attach by route existence, not local worker pid**
+
+Run: `mix test test/prehen/client/surface_test.exs test/prehen_web/channels/session_channel_test.exs test/prehen/gateway/cluster_session_test.exs`
+
+Expected: PASS
+
+- [ ] **Step 5: Commit the route-state split and green contract tests**
+
+```bash
+git add lib/prehen/gateway/local_session_index.ex lib/prehen/gateway/local_launcher.ex lib/prehen/gateway/session_registry.ex lib/prehen/client/surface.ex lib/prehen_web/channels/session_channel.ex test/prehen/client/surface_test.exs test/prehen_web/channels/session_channel_test.exs test/prehen/gateway/cluster_session_test.exs
+git commit -m "refactor: split route ledger from local worker index"
+```
+
+## Task 3: Introduce the Cluster Node Registry
 
 **Files:**
 - Create: `lib/prehen/gateway/node_registry.ex`
 - Modify: `lib/prehen/gateway/supervisor.ex`
 - Modify: `lib/prehen/application.ex`
+- Modify: `lib/prehen/gateway/local_launcher.ex`
 - Test: `test/prehen/gateway/node_registry_test.exs`
 
-- [ ] **Step 1: Write the failing local-snapshot implementation test**
+- [ ] **Step 1: Write the failing local-publication test**
 
 Add to `test/prehen/gateway/node_registry_test.exs`:
 
 ```elixir
-test "expires stale remote snapshots" do
-  now = System.system_time(:millisecond)
-
-  :ok =
-    NodeRegistry.merge_remote_snapshot(%{
-      node: :"stale@127.0.0.1",
-      status: :up,
-      agent_names: ["fake_stdio"],
-      active_session_count: 1,
-      session_capacity: 4,
-      updated_at_ms: now - 120_000
-    })
-
-  NodeRegistry.expire_stale(now_ms: now, ttl_ms: 60_000)
-
-  assert {:error, :not_found} = NodeRegistry.fetch(:"stale@127.0.0.1")
+test "publishes local health based on active sessions and configured capacity" do
+  assert {:ok, snapshot} = NodeRegistry.fetch(node())
+  assert snapshot.status == :up
+  assert is_integer(snapshot.active_session_count)
+  assert is_integer(snapshot.session_capacity)
 end
 ```
 
@@ -235,23 +308,13 @@ end
 
 Run: `mix test test/prehen/gateway/node_registry_test.exs`
 
-Expected: FAIL because expiry and snapshot storage are missing.
+Expected: FAIL because local snapshot publication is not implemented.
 
-- [ ] **Step 3: Implement the registry module and wire it into the supervisor**
+- [ ] **Step 3: Implement the registry module and wire local snapshot publication**
 
-```elixir
-defmodule Prehen.Gateway.NodeRegistry do
-  use GenServer
+`LocalLauncher` should publish local session-count changes into `NodeRegistry` when workers start and stop.
 
-  def put_local_snapshot(snapshot), do: GenServer.call(__MODULE__, {:put_local, snapshot})
-  def merge_remote_snapshot(snapshot), do: GenServer.call(__MODULE__, {:merge_remote, snapshot})
-  def fetch(node_name), do: GenServer.call(__MODULE__, {:fetch, node_name})
-  def all, do: GenServer.call(__MODULE__, :all)
-  def expire_stale(opts \\ []), do: GenServer.call(__MODULE__, {:expire_stale, opts})
-end
-```
-
-- [ ] **Step 4: Update application health to report node-registry status**
+- [ ] **Step 4: Add expiry and healthy-node evaluation coverage**
 
 Run: `mix test test/prehen/gateway/node_registry_test.exs`
 
@@ -260,11 +323,11 @@ Expected: PASS
 - [ ] **Step 5: Commit the node-registry skeleton**
 
 ```bash
-git add lib/prehen/gateway/node_registry.ex lib/prehen/gateway/supervisor.ex lib/prehen/application.ex test/prehen/gateway/node_registry_test.exs
+git add lib/prehen/gateway/node_registry.ex lib/prehen/gateway/supervisor.ex lib/prehen/application.ex lib/prehen/gateway/local_launcher.ex test/prehen/gateway/node_registry_test.exs
 git commit -m "feat: add cluster node registry"
 ```
 
-## Task 3: Add Cluster-Aware Route Selection
+## Task 4: Add Cluster-Aware Route Selection
 
 **Files:**
 - Create: `lib/prehen/gateway/cluster_router.ex`
@@ -308,24 +371,22 @@ Run: `mix test test/prehen/gateway/cluster_router_test.exs`
 
 Expected: FAIL because remote fallback is missing.
 
-- [ ] **Step 3: Implement cluster-aware selection and expand route records**
+- [ ] **Step 3: Implement cluster-aware selection**
 
-`SessionRegistry.put/1` should start storing:
+`ClusterRouter.route/1` should return:
 
 ```elixir
 %{
-  gateway_session_id: gateway_session_id,
   entry_node: node(),
-  target_node: target_node,
-  agent_name: agent_name,
-  agent_session_id: agent_session_id,
-  worker_pid: worker_pid,
-  remote_ref: remote_ref,
-  status: :attached
+  target_node: chosen_node,
+  agent_name: "fake_stdio",
+  mode: if(chosen_node == node(), do: :local, else: :remote)
 }
 ```
 
-- [ ] **Step 4: Keep the old local route path working through the new router**
+The `test_target_node` override used in tests must remain internal control-plane plumbing, not a public client API contract.
+
+- [ ] **Step 4: Re-run the router tests**
 
 Run: `mix test test/prehen/gateway/cluster_router_test.exs test/prehen/gateway/session_registry_test.exs`
 
@@ -338,21 +399,21 @@ git add lib/prehen/gateway/cluster_router.ex lib/prehen/gateway/router.ex lib/pr
 git commit -m "feat: add cluster-aware node selection"
 ```
 
-## Task 4: Add Target-Node Local Launch and Remote Session Control
+## Task 5: Add Target-Node Launch, Submit, Status, and Stop by Gateway Session Id
 
 **Files:**
-- Create: `lib/prehen/gateway/local_launcher.ex`
 - Create: `lib/prehen/gateway/cluster_session.ex`
-- Modify: `lib/prehen/gateway/session_worker.ex`
+- Modify: `lib/prehen/gateway/local_launcher.ex`
 - Modify: `lib/prehen/client/surface.ex`
 - Test: `test/prehen/gateway/cluster_session_test.exs`
+- Test: `test/prehen/client/surface_test.exs`
 
-- [ ] **Step 1: Write the failing remote-launch test**
+- [ ] **Step 1: Write the failing remote-launch and remote-stop tests**
 
 Add to `test/prehen/gateway/cluster_session_test.exs`:
 
 ```elixir
-test "launch_remote starts a worker on the target node and returns route metadata" do
+test "launch_remote starts a worker on the target node and stop_remote stops it by gateway_session_id" do
   {:ok, remote_node} = Prehen.TestSupport.ClusterTestNode.start_link()
 
   assert {:ok, %{target_node: ^remote_node, agent_session_id: agent_session_id}} =
@@ -362,52 +423,68 @@ test "launch_remote starts a worker on the target node and returns route metadat
            )
 
   assert is_binary(agent_session_id)
+  assert :ok = Prehen.Gateway.ClusterSession.stop_remote(remote_node, "gw_remote_1")
 end
 ```
 
-- [ ] **Step 2: Run the remote-launch test to verify it fails**
-
-Run: `mix test test/prehen/gateway/cluster_session_test.exs`
-
-Expected: FAIL because the remote launcher path does not exist yet.
-
-- [ ] **Step 3: Implement the target-node launcher and entry-node remote adapter**
-
-The target-node launcher API should look like:
+- [ ] **Step 2: Add the failing ambiguous-launch test**
 
 ```elixir
-def launch(opts) do
-  with {:ok, profile} <- Prehen.Gateway.Router.route(agent: opts[:agent]),
-       {:ok, session} <- Prehen.Gateway.SessionWorker.start_session(profile, opts) do
-    {:ok, %{worker_pid: session.worker_pid, gateway_session_id: session.gateway_session_id}}
-  end
+test "ambiguous remote launch outcome does not retry another node" do
+  {:ok, flaky_node} = Prehen.TestSupport.ClusterTestNode.start_link(mode: :timeout_on_launch)
+
+  assert {:error, :remote_launch_outcome_unknown} =
+           Prehen.Client.Surface.create_session(
+             agent: "fake_stdio",
+             gateway_session_id: "gw_no_retry",
+             test_target_node: flaky_node
+           )
 end
 ```
 
-The entry-node adapter should hide the RPC details from `Surface`.
-
-- [ ] **Step 4: Re-run the remote-session tests**
+- [ ] **Step 3: Run the remote-session test to verify it fails**
 
 Run: `mix test test/prehen/gateway/cluster_session_test.exs`
 
-Expected: PASS for remote launch and stop basics.
+Expected: FAIL because remote control by `gateway_session_id` does not exist yet.
 
-- [ ] **Step 5: Commit the remote session-control path**
+- [ ] **Step 4: Implement the target-node launcher and entry-node remote adapter**
+
+The target-node launcher API should be keyed by `gateway_session_id`, not worker refs:
+
+```elixir
+def launch(opts), do: {:ok, %{gateway_session_id: opts[:gateway_session_id], agent_session_id: "..."}}
+def submit(gateway_session_id, attrs), do: :ok
+def status(gateway_session_id), do: {:ok, %{status: :attached}}
+def stop(gateway_session_id), do: :ok
+```
+
+Only explicit pre-launch refusals may fall through to another candidate. Unknown outcomes must fail closed.
+
+- [ ] **Step 5: Re-run the remote control tests**
+
+Run: `mix test test/prehen/gateway/cluster_session_test.exs test/prehen/client/surface_test.exs`
+
+Expected: PASS
+
+- [ ] **Step 6: Commit the remote session-control path**
 
 ```bash
-git add lib/prehen/gateway/local_launcher.ex lib/prehen/gateway/cluster_session.ex lib/prehen/gateway/session_worker.ex lib/prehen/client/surface.ex test/prehen/gateway/cluster_session_test.exs
+git add lib/prehen/gateway/cluster_session.ex lib/prehen/gateway/local_launcher.ex lib/prehen/client/surface.ex test/prehen/gateway/cluster_session_test.exs test/prehen/client/surface_test.exs
 git commit -m "feat: add remote session control across gateway nodes"
 ```
 
-## Task 5: Forward Remote Events Back to the Entry Node
+## Task 6: Forward Remote Events Back to the Entry Node
 
 **Files:**
+- Create: `lib/prehen/gateway/cluster_event_relay.ex`
 - Modify: `lib/prehen/gateway/cluster_session.ex`
 - Modify: `lib/prehen/gateway/session_worker.ex`
 - Modify: `lib/prehen/client/surface.ex`
 - Modify: `lib/prehen_web/channels/session_channel.ex`
 - Test: `test/prehen/gateway/cluster_session_test.exs`
 - Test: `test/prehen/integration/platform_runtime_test.exs`
+- Test: `test/prehen_web/channels/session_channel_test.exs`
 
 - [ ] **Step 1: Write the failing remote-event-forwarding test**
 
@@ -418,7 +495,11 @@ test "remote worker events are rebroadcast on the entry node topic" do
   {:ok, remote_node} = Prehen.TestSupport.ClusterTestNode.start_link()
 
   assert {:ok, %{session_id: session_id}} =
-           Prehen.Client.Surface.create_session(agent: "fake_stdio", target_node: remote_node)
+           Prehen.Client.Surface.create_session(
+             agent: "fake_stdio",
+             gateway_session_id: "gw_remote_forward",
+             test_target_node: remote_node
+           )
 
   :ok = Phoenix.PubSub.subscribe(Prehen.PubSub, "session:#{session_id}")
 
@@ -437,13 +518,14 @@ Expected: FAIL because remote events are not rebroadcast on the entry node.
 
 - [ ] **Step 3: Forward normalized events instead of raw transport frames**
 
-The target node should forward already-normalized gateway envelopes.
+`ClusterEventRelay` should own the target-side subscription and forwarding. `SessionWorker` should continue emitting normalized local events only.
 
 The entry node should:
 
 - persist observability
 - rebroadcast over local PubSub
 - keep the existing channel contract unchanged
+- emit route failure events when the target node disconnects
 
 - [ ] **Step 4: Re-run the remote forwarding and integration tests**
 
@@ -454,11 +536,11 @@ Expected: PASS
 - [ ] **Step 5: Commit remote event forwarding**
 
 ```bash
-git add lib/prehen/gateway/cluster_session.ex lib/prehen/gateway/session_worker.ex lib/prehen/client/surface.ex lib/prehen_web/channels/session_channel.ex test/prehen/gateway/cluster_session_test.exs test/prehen/integration/platform_runtime_test.exs test/prehen_web/channels/session_channel_test.exs
+git add lib/prehen/gateway/cluster_event_relay.ex lib/prehen/gateway/cluster_session.ex lib/prehen/gateway/session_worker.ex lib/prehen/client/surface.ex lib/prehen_web/channels/session_channel.ex test/prehen/gateway/cluster_session_test.exs test/prehen/integration/platform_runtime_test.exs test/prehen_web/channels/session_channel_test.exs
 git commit -m "feat: forward remote gateway events on entry nodes"
 ```
 
-## Task 6: Surface Node-Aware Status and Failure Semantics
+## Task 7: Surface Node-Aware Status and Failure Semantics
 
 **Files:**
 - Modify: `lib/prehen/client/surface.ex`
@@ -467,6 +549,7 @@ git commit -m "feat: forward remote gateway events on entry nodes"
 - Modify: `lib/prehen_web/serializers/event_serializer.ex`
 - Test: `test/prehen/client/surface_test.exs`
 - Test: `test/prehen/integration/platform_runtime_test.exs`
+- Test: `test/prehen_web/channels/session_channel_test.exs`
 
 - [ ] **Step 1: Write the failing status test**
 
@@ -477,7 +560,10 @@ test "session_status includes target_node for remote sessions" do
   {:ok, remote_node} = Prehen.TestSupport.ClusterTestNode.start_link()
 
   assert {:ok, %{session_id: session_id}} =
-           Surface.create_session(agent: "fake_stdio", target_node: remote_node)
+           Surface.create_session(
+             agent: "fake_stdio",
+             test_target_node: remote_node
+           )
 
   assert {:ok, status} = Surface.session_status(session_id)
   assert status.target_node == remote_node
@@ -487,7 +573,7 @@ end
 
 - [ ] **Step 2: Run the status test to verify it fails**
 
-Run: `mix test test/prehen/client/surface_test.exs`
+Run: `mix test test/prehen/client/surface_test.exs test/prehen_web/channels/session_channel_test.exs`
 
 Expected: FAIL because session status does not include node-aware route metadata.
 
@@ -496,24 +582,32 @@ Expected: FAIL because session status does not include node-aware route metadata
 Expected failure shapes:
 
 ```elixir
+{:error, %{type: :session_create_failed, reason: :no_route_available}}
+{:error, %{type: :session_create_failed, reason: :remote_launch_outcome_unknown}}
 {:error, %{type: :submit_failed, reason: :target_node_unreachable}}
 {:error, %{type: :session_status_failed, reason: :not_found}}
 ```
 
-- [ ] **Step 4: Re-run the HTTP/controller tests**
+Add channel coverage for:
 
-Run: `mix test test/prehen/client/surface_test.exs test/prehen/integration/platform_runtime_test.exs`
+```elixir
+assert_push "event", %{"type" => "route.failed", "session_id" => session_id}
+```
+
+- [ ] **Step 4: Re-run the HTTP, controller, and channel tests**
+
+Run: `mix test test/prehen/client/surface_test.exs test/prehen/integration/platform_runtime_test.exs test/prehen_web/channels/session_channel_test.exs`
 
 Expected: PASS
 
 - [ ] **Step 5: Commit node-aware status reporting**
 
 ```bash
-git add lib/prehen/client/surface.ex lib/prehen_web/controllers/session_controller.ex lib/prehen_web/controllers/agent_controller.ex lib/prehen_web/serializers/event_serializer.ex test/prehen/client/surface_test.exs test/prehen/integration/platform_runtime_test.exs
+git add lib/prehen/client/surface.ex lib/prehen_web/controllers/session_controller.ex lib/prehen_web/controllers/agent_controller.ex lib/prehen_web/serializers/event_serializer.ex test/prehen/client/surface_test.exs test/prehen/integration/platform_runtime_test.exs test/prehen_web/channels/session_channel_test.exs
 git commit -m "feat: expose node-aware gateway session status"
 ```
 
-## Task 7: Final Verification and Documentation Touch-Up
+## Task 8: Final Verification and Documentation Touch-Up
 
 **Files:**
 - Modify: `README.md`
@@ -527,7 +621,7 @@ Add concise notes covering:
 
 - entry node versus target node
 - cluster node registry
-- sticky route ledger
+- split between route ledger and local session index
 - what still is not supported
 
 - [ ] **Step 2: Run the focused routing suite**
