@@ -23,12 +23,7 @@ defmodule Prehen.Application do
     children = [
       {Phoenix.PubSub, name: Prehen.PubSub},
       {Prehen.Gateway.Supervisor, [agent_profiles: config.agent_profiles]},
-      {Prehen.Tools.PackRegistry, []},
-      {Prehen.Workspace.SessionSupervisor, []},
-      {Prehen.Workspace.SessionManager, []},
-      {Prehen.Memory.Supervisor, []},
-      {Prehen.Conversation.Store, []},
-      {Prehen.Events.ProjectionSupervisor, []},
+      {Prehen.Observability.TraceCollector, []},
       PrehenWeb.Endpoint
     ]
 
@@ -42,12 +37,7 @@ defmodule Prehen.Application do
     %{
       gateway_supervisor: supervisor_health(Prehen.Gateway.Supervisor),
       agent_registry: module_health(Prehen.Agents.Registry),
-      tool_pack_registry: module_health(Prehen.Tools.PackRegistry),
-      session_supervisor: supervisor_health(Prehen.Workspace.SessionSupervisor),
-      session_manager: module_health(Prehen.Workspace.SessionManager),
-      memory_supervisor: supervisor_health(Prehen.Memory.Supervisor),
-      conversation_store: module_health(Prehen.Conversation.Store),
-      projection_supervisor: supervisor_health(Prehen.Events.ProjectionSupervisor)
+      trace_collector: module_health(Prehen.Observability.TraceCollector)
     }
   end
 

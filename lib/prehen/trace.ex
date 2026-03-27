@@ -12,6 +12,7 @@ defmodule Prehen.Trace do
   """
 
   alias Prehen.Agent.EventBridge
+  alias Prehen.Observability.TraceCollector
 
   @spec new() :: [map()]
   def new, do: []
@@ -20,6 +21,11 @@ defmodule Prehen.Trace do
   def add(events, event_type, payload \\ %{}) do
     normalized_type = normalize_type(event_type)
     events ++ [EventBridge.project(normalized_type, payload, source: "prehen.trace")]
+  end
+
+  @spec for_session(String.t()) :: {:ok, [map()]}
+  def for_session(session_id) when is_binary(session_id) do
+    TraceCollector.for_session(session_id)
   end
 
   defp normalize_type(value) when is_binary(value) and value != "", do: value

@@ -190,71 +190,89 @@ defmodule Prehen.Client.Surface do
   @spec run(String.t(), keyword()) :: {:ok, map()} | {:error, map()}
   def run(task, opts \\ []) when is_binary(task) and is_list(opts) do
     config = Config.load(opts)
+    timeout = Keyword.get(opts, :timeout_ms, config[:timeout_ms])
+    config_error = maybe_ignore_gateway_agent_template_error(config[:config_error])
 
-    cond do
-      config_error = config[:config_error] ->
-        {:error, error_payload(:runtime_failed, config_error)}
+    try do
+      with nil <- config_error,
+           {:ok, session} <- start_or_attach_gateway_session(opts),
+           {:ok, response} <- submit_message(session.session_id, task, request_id: gen_id("request")),
+           {:ok, answer} <- await_gateway_answer(session.session_id, timeout),
+           {:ok, trace} <- Prehen.Trace.for_session(session.session_id) do
+        {:ok,
+         %{
+           status: :ok,
+           answer: answer,
+           trace: trace,
+           session_id: session.session_id,
+           request_id: response.request_id,
+           queued: response.queued
+         }}
+      else
+        config_error when is_map(config_error) ->
+          {:error, error_payload(:runtime_failed, config_error)}
 
-      config[:agent_backend] != Prehen.Agent.Backends.JidoAI ->
-        case Runtime.run(task, opts) do
-          {:ok, result} -> {:ok, result}
-          {:error, reason} -> {:error, error_payload(:runtime_failed, reason)}
+        {:error, reason} ->
+          {:error, error_payload(:runtime_failed, reason)}
+      end
+    after
+      maybe_stop_gateway_session_if_owned(opts)
+    end
+  end
+
+  defp maybe_ignore_gateway_agent_template_error(%{code: :agent_template_not_found}), do: nil
+  defp maybe_ignore_gateway_agent_template_error(other), do: other
+
+  defp start_or_attach_gateway_session(opts) do
+    case opts |> Keyword.get(:session_id) |> normalize_session_id() do
+      nil ->
+        with {:ok, %{session_id: session_id}} <- create_session(opts) do
+          Process.put(:prehen_gateway_session_owned, session_id)
+          {:ok, %{session_id: session_id}}
         end
 
-      true ->
-        timeout = config[:timeout_ms] * max(config[:max_steps], 1) * 2
-        session_id = opts |> Keyword.get(:session_id) |> normalize_session_id()
-
-        start_session =
-          if is_binary(session_id) do
-            with {:ok, session_pid} <- Runtime.resume_session(session_id, opts),
-                 {:ok, status} <- Runtime.session_status(session_pid) do
-              {:ok, %{session_pid: session_pid, session_id: status.session_id}}
-            end
-          else
-            with {:ok, session_pid} <- Runtime.start_session(opts),
-                 {:ok, status} <- Runtime.session_status(session_pid) do
-              {:ok, %{session_pid: session_pid, session_id: status.session_id}}
-            end
-          end
-
-        case start_session do
-          {:ok, session} ->
-            request_id = gen_id("request")
-
-            try do
-              with {:ok, response} <-
-                     Runtime.prompt(session.session_pid, task,
-                       request_id: request_id,
-                       run_id: request_id
-                     ),
-                   {:ok, result} <- await_result(session.session_pid, timeout: timeout) do
-                {:ok,
-                 result
-                 |> Map.put_new(:session_id, session.session_id)
-                 |> Map.put_new(:request_id, request_id)
-                 |> Map.put_new(:queued, response.queued)}
-              else
-                {:error, _reason} = error ->
-                  error
-              end
-            after
-              maybe_stop_session(session.session_pid)
-            end
-
-          {:error, reason} ->
-            {:error, error_payload(:runtime_failed, reason)}
+      session_id ->
+        case SessionRegistry.fetch_worker(session_id) do
+          {:ok, _worker_pid} -> {:ok, %{session_id: session_id}}
+          {:error, _reason} -> {:error, {:gateway_session_not_found, session_id}}
         end
     end
   end
 
-  defp maybe_stop_session(nil), do: :ok
+  defp await_gateway_answer(session_id, timeout_ms) do
+    topic = "session:#{session_id}"
+    :ok = Phoenix.PubSub.subscribe(Prehen.PubSub, topic)
 
-  defp maybe_stop_session(session_pid) when is_pid(session_pid) do
-    if Process.alive?(session_pid), do: Runtime.stop_session(session_pid), else: :ok
+    try do
+      receive do
+        {:gateway_event, %{type: "session.output.delta", payload: payload}} ->
+          {:ok, Map.get(payload, "text") || Map.get(payload, :text) || ""}
+
+        {:gateway_event, %{"type" => "session.output.delta", "payload" => payload}} ->
+          {:ok, Map.get(payload, "text") || ""}
+      after
+        timeout_ms -> {:error, :timeout}
+      end
+    after
+      Phoenix.PubSub.unsubscribe(Prehen.PubSub, topic)
+    end
   end
 
-  defp maybe_stop_session(_), do: :ok
+  defp maybe_stop_gateway_session_if_owned(opts) do
+    session_id = Process.delete(:prehen_gateway_session_owned)
+
+    cond do
+      not is_binary(session_id) ->
+        :ok
+
+      Keyword.has_key?(opts, :session_id) ->
+        :ok
+
+      true ->
+        stop_session(session_id)
+        :ok
+    end
+  end
 
   defp normalize_kind(:prompt), do: :prompt
   defp normalize_kind(:steering), do: :steering

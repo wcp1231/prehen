@@ -7,6 +7,7 @@ defmodule Prehen.Gateway.SessionWorker do
   alias Prehen.Agents.Profile
   alias Prehen.Gateway.Router
   alias Prehen.Gateway.SessionRegistry
+  alias Prehen.Observability.TraceCollector
 
   def start_session(%Profile{} = profile, opts \\ []) do
     gateway_session_id = Keyword.get(opts, :gateway_session_id, gen_gateway_session_id())
@@ -65,6 +66,14 @@ defmodule Prehen.Gateway.SessionWorker do
                      status: :attached
                    }) do
                 :ok ->
+                  TraceCollector.record(%{
+                    type: "agent.started",
+                    session_id: gateway_session_id,
+                    gateway_session_id: gateway_session_id,
+                    agent: profile.name,
+                    agent_session_id: agent_session_id
+                  })
+
                   owner = self()
                   receiver = spawn_link(fn -> recv_loop(owner, transport_module, transport) end)
 
@@ -139,6 +148,14 @@ defmodule Prehen.Gateway.SessionWorker do
 
   @impl true
   def terminate(_reason, state) do
+    TraceCollector.record(%{
+      type: "agent.stopped",
+      session_id: state.gateway_session_id,
+      gateway_session_id: state.gateway_session_id,
+      agent: state.agent_name,
+      agent_session_id: state.agent_session_id
+    })
+
     safe_stop_transport(state.transport_module, state.transport)
     safe_delete_registry_route(state.gateway_session_id)
 
@@ -146,6 +163,8 @@ defmodule Prehen.Gateway.SessionWorker do
   end
 
   defp dispatch_event(state, event) do
+    TraceCollector.record(event)
+
     if is_pid(state.test_pid) do
       send(state.test_pid, {:gateway_event, event})
     end

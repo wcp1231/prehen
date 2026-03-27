@@ -80,4 +80,19 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
     conn = delete(build_conn(), "/sessions/missing_session")
     assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
   end
+
+  test "records gateway lifecycle events for a session run" do
+    assert {:ok, %{session_id: gateway_session_id}} =
+             Prehen.Client.Surface.create_session(agent: "fake_stdio")
+
+    on_exit(fn -> Surface.stop_session(gateway_session_id) end)
+
+    assert {:ok, _submit} =
+             Prehen.Client.Surface.submit_message(gateway_session_id, "hello trace")
+
+    Process.sleep(100)
+
+    assert {:ok, events} = Prehen.Trace.for_session(gateway_session_id)
+    assert Enum.any?(events, &(&1.type == "agent.started"))
+  end
 end
