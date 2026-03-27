@@ -18,10 +18,11 @@ defmodule Prehen.Application do
 
   @impl true
   def start(_type, _args) do
+    config = Prehen.Config.load()
+
     children = [
       {Phoenix.PubSub, name: Prehen.PubSub},
-      {Prehen.Agent.JidoRuntimeStarter, []},
-      {Prehen.Agent.Supervisor, []},
+      {Prehen.Gateway.Supervisor, [agent_profiles: config.agent_profiles]},
       {Prehen.Tools.PackRegistry, []},
       {Prehen.Workspace.SessionSupervisor, []},
       {Prehen.Workspace.SessionManager, []},
@@ -39,8 +40,8 @@ defmodule Prehen.Application do
   @spec health() :: map()
   def health do
     %{
-      jido_runtime: module_health(Prehen.JidoRuntime),
-      agent_supervisor: supervisor_health(Prehen.Agent.Supervisor),
+      gateway_supervisor: supervisor_health(Prehen.Gateway.Supervisor),
+      agent_registry: module_health(Prehen.Agents.Registry),
       tool_pack_registry: module_health(Prehen.Tools.PackRegistry),
       session_supervisor: supervisor_health(Prehen.Workspace.SessionSupervisor),
       session_manager: module_health(Prehen.Workspace.SessionManager),

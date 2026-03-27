@@ -1,8 +1,10 @@
 defmodule Prehen.Client.SurfaceTest do
   use ExUnit.Case
 
+  alias Prehen.Agents.Registry
   alias Prehen.Client.Surface
   alias Prehen.Conversation.SessionLedger
+  alias Prehen.Gateway.Router
 
   defp client_opts(extra) do
     base = [
@@ -15,6 +17,31 @@ defmodule Prehen.Client.SurfaceTest do
     ]
 
     Keyword.merge(base, extra)
+  end
+
+  test "application boots gateway registry runtime children" do
+    assert is_pid(Process.whereis(Prehen.Gateway.Supervisor))
+    assert [] = Registry.all()
+    assert {:error, :no_agent_profiles_configured} = Router.route()
+  end
+
+  test "router resolves an explicitly requested configured profile" do
+    pid = Process.whereis(Prehen.Agents.Registry)
+    original = :sys.get_state(pid)
+
+    :sys.replace_state(pid, fn _state ->
+      profile = %Prehen.Agents.Profile{name: "fake_stdio", command: "elixir", args: ["fake.exs"]}
+
+      %{
+        ordered: [profile],
+        by_name: %{"fake_stdio" => profile}
+      }
+    end)
+
+    on_exit(fn -> :sys.replace_state(pid, fn _state -> original end) end)
+
+    assert {:ok, %Prehen.Agents.Profile{name: "fake_stdio"}} =
+             Router.route(agent: "fake_stdio")
   end
 
   test "unified session api supports create/submit/status/stop" do

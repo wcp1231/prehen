@@ -3,6 +3,7 @@ defmodule Prehen.Config do
 
   alias Prehen.Config.Structured
   alias Prehen.Workspace.Paths
+  alias Prehen.Agents.Profile
 
   @defaults %{
     agent: nil,
@@ -108,6 +109,7 @@ defmodule Prehen.Config do
       agent_template: resolved_agent,
       structured_config: structured,
       config_error: config_error,
+      agent_profiles: agent_profiles_config(merged_overrides),
       agent_backend: agent_backend(merged_overrides),
       session_adapter: module_config(merged_overrides, :session_adapter),
       retry_policy: module_config(merged_overrides, :retry_policy),
@@ -313,6 +315,9 @@ defmodule Prehen.Config do
 
   defp normalize_runtime_entry("model_params", value) when is_map(value),
     do: {:model_params, value}
+
+  defp normalize_runtime_entry("agent_profiles", value) when is_map(value),
+    do: {:agent_profiles, value}
 
   defp normalize_runtime_entry("temperature", value) do
     case normalize_temperature(value) do
@@ -542,6 +547,194 @@ defmodule Prehen.Config do
       :agent_backend,
       Application.get_env(:prehen, :agent_backend, Map.fetch!(@defaults, :agent_backend))
     )
+  end
+
+  defp agent_profiles_config(overrides) do
+    overrides
+    |> Keyword.get(:agent_profiles, Application.get_env(:prehen, :agent_profiles, []))
+    |> normalize_agent_profiles()
+  end
+
+  defp normalize_agent_profiles(%{} = profiles) do
+    profiles
+    |> Enum.to_list()
+    |> normalize_agent_profiles()
+  end
+
+  defp normalize_agent_profiles(profiles) when is_list(profiles) do
+    {normalized, _seen} =
+      Enum.reduce(profiles, {[], MapSet.new()}, fn
+        %Profile{} = profile, {acc, seen} ->
+          normalized = normalize_profile_struct(profile)
+          name = normalized.name
+          ensure_unique_profile_name!(name, seen)
+          {acc ++ [normalized], MapSet.put(seen, name)}
+
+        {name, attrs}, {acc, seen} ->
+          normalized = normalize_agent_profile!(name, attrs)
+          profile_name = normalized.name
+          ensure_unique_profile_name!(profile_name, seen)
+          {acc ++ [normalized], MapSet.put(seen, profile_name)}
+
+        invalid, _acc ->
+          raise ArgumentError, "invalid agent profile entry: #{inspect(invalid)}"
+      end)
+
+    normalized
+  end
+
+  defp normalize_agent_profiles(_profiles), do: []
+
+  defp normalize_profile_struct(%Profile{} = profile) do
+    name =
+      profile.name
+      |> normalize_profile_name()
+      |> invalid_profile!(profile.name, "name must be a non-empty string")
+
+    {command, args} =
+      profile
+      |> profile_to_attrs()
+      |> normalize_profile_command!(name)
+
+    %Profile{
+      name: name,
+      command: command,
+      args: args,
+      env: normalize_profile_env(profile_to_attrs(profile)),
+      transport: normalize_profile_transport!(profile_to_attrs(profile), name),
+      metadata: normalize_profile_metadata(profile_to_attrs(profile))
+    }
+  end
+
+  defp normalize_agent_profile!(name, attrs) do
+    normalized_name =
+      name
+      |> normalize_profile_name()
+      |> invalid_profile!(name, "name must be a non-empty string")
+
+    {command, args} = normalize_profile_command!(attrs, normalized_name)
+
+    %Profile{
+      name: normalized_name,
+      command: command,
+      args: args,
+      env: normalize_profile_env(attrs),
+      transport: normalize_profile_transport!(attrs, normalized_name),
+      metadata: normalize_profile_metadata(attrs)
+    }
+  end
+
+  defp normalize_profile_name(name) when is_binary(name), do: normalize_optional_binary(name)
+
+  defp normalize_profile_name(name) when is_atom(name),
+    do: name |> Atom.to_string() |> normalize_profile_name()
+
+  defp normalize_profile_name(_name), do: nil
+
+  defp normalize_profile_command(attrs) when is_list(attrs) do
+    attrs |> Map.new() |> normalize_profile_command()
+  end
+
+  defp normalize_profile_command(%{} = attrs) do
+    case Map.get(attrs, :command, Map.get(attrs, "command")) do
+      [command | args] when is_binary(command) ->
+        {:ok, command, Enum.filter(args, &is_binary/1)}
+
+      command when is_binary(command) ->
+        {:ok, command, normalize_profile_args(Map.get(attrs, :args, Map.get(attrs, "args", [])))}
+
+      _ ->
+        :error
+    end
+  end
+
+  defp normalize_profile_command(_attrs), do: :error
+
+  defp normalize_profile_command!(attrs, profile_name) do
+    case normalize_profile_command(attrs) do
+      {:ok, command, args} ->
+        {command, args}
+
+      :error ->
+        raise ArgumentError,
+              "invalid agent profile #{inspect(profile_name)}: command must be a non-empty string or argv list"
+    end
+  end
+
+  defp normalize_profile_args(args) when is_list(args), do: Enum.filter(args, &is_binary/1)
+  defp normalize_profile_args(_args), do: []
+
+  defp normalize_profile_env(attrs) when is_list(attrs),
+    do: attrs |> Map.new() |> normalize_profile_env()
+
+  defp normalize_profile_env(%{} = attrs) do
+    attrs
+    |> Map.get(:env, Map.get(attrs, "env", %{}))
+    |> case do
+      %{} = env ->
+        Map.new(env, fn {key, value} -> {to_string(key), to_string(value)} end)
+
+      _ ->
+        %{}
+    end
+  end
+
+  defp normalize_profile_env(_attrs), do: %{}
+
+  defp normalize_profile_transport(attrs) when is_list(attrs),
+    do: attrs |> Map.new() |> normalize_profile_transport()
+
+  defp normalize_profile_transport(%{} = attrs) do
+    case Map.get(attrs, :transport, Map.get(attrs, "transport", :stdio)) do
+      transport when transport in [:stdio, "stdio"] -> :stdio
+      _ -> :error
+    end
+  end
+
+  defp normalize_profile_transport(_attrs), do: :error
+
+  defp normalize_profile_transport!(attrs, profile_name) do
+    case normalize_profile_transport(attrs) do
+      :stdio ->
+        :stdio
+
+      :error ->
+        raise ArgumentError,
+              "invalid agent profile #{inspect(profile_name)}: transport must be :stdio"
+    end
+  end
+
+  defp normalize_profile_metadata(attrs) when is_list(attrs),
+    do: attrs |> Map.new() |> normalize_profile_metadata()
+
+  defp normalize_profile_metadata(%{} = attrs) do
+    case Map.get(attrs, :metadata, Map.get(attrs, "metadata", %{})) do
+      %{} = metadata -> metadata
+      _ -> %{}
+    end
+  end
+
+  defp normalize_profile_metadata(_attrs), do: %{}
+
+  defp ensure_unique_profile_name!(name, seen) do
+    if MapSet.member?(seen, name) do
+      raise ArgumentError, "duplicate agent profile name: #{inspect(name)}"
+    end
+  end
+
+  defp invalid_profile!(nil, profile_name, message) do
+    raise ArgumentError, "invalid agent profile #{inspect(profile_name)}: #{message}"
+  end
+
+  defp invalid_profile!(value, _profile_name, _message), do: value
+
+  defp profile_to_attrs(%Profile{} = profile) do
+    %{
+      command: [profile.command | List.wrap(profile.args)],
+      env: profile.env,
+      transport: profile.transport,
+      metadata: profile.metadata
+    }
   end
 
   defp module_config(overrides, key) do
