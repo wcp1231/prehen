@@ -13,4 +13,8 @@ defmodule Prehen.Gateway.SessionRegistryTest do
     assert {:ok, %{agent_session_id: "agent_gw_1"}} =
              Prehen.Gateway.SessionRegistry.fetch("gw_1")
   end
+
+  test "returns not found for unknown gateway session id" do
+    assert {:error, :not_found} = Prehen.Gateway.SessionRegistry.fetch("missing")
+  end
 end
