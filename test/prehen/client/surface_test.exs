@@ -136,9 +136,34 @@ defmodule Prehen.Client.SurfaceTest do
 
     assert {:ok, status} = Surface.session_status(session_id)
     assert status.session_id == session_id
-    assert status.status == :attached
+    assert status.status == :running
     assert status.agent_name == "fake_stdio"
     assert is_binary(status.agent_session_id)
+  end
+
+  test "session_status retains stopped and crashed terminal sessions" do
+    assert {:ok, %{session_id: stopped_session_id}} = Surface.create_session(agent: "fake_stdio")
+    assert :ok = Surface.stop_session(stopped_session_id)
+
+    assert {:ok, stopped_status} = Surface.session_status(stopped_session_id)
+    assert stopped_status.session_id == stopped_session_id
+    assert stopped_status.status == :stopped
+    assert stopped_status.agent_name == "fake_stdio"
+    assert is_binary(stopped_status.agent_session_id)
+
+    assert {:ok, %{session_id: crashed_session_id}} = Surface.create_session(agent: "fake_stdio")
+    assert {:ok, worker_pid} = SessionRegistry.fetch_worker(crashed_session_id)
+    transport_pid = :sys.get_state(worker_pid).transport
+    monitor_ref = Process.monitor(worker_pid)
+
+    Process.exit(transport_pid, :kill)
+    assert_receive {:DOWN, ^monitor_ref, :process, ^worker_pid, _reason}, 2_000
+
+    assert {:ok, crashed_status} = Surface.session_status(crashed_session_id)
+    assert crashed_status.session_id == crashed_session_id
+    assert crashed_status.status == :crashed
+    assert crashed_status.agent_name == "fake_stdio"
+    assert is_binary(crashed_status.agent_session_id)
   end
 
   test "run/2 on reused session correlates to its own request_id and returns complete trace" do

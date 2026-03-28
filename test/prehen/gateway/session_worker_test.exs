@@ -61,7 +61,7 @@ defmodule Prehen.Gateway.SessionWorkerTest do
                parts: [%{type: "text", text: "hi"}]
              })
 
-    assert {:ok, %{agent_session_id: "agent_gw_1", status: :attached}} =
+    assert {:ok, %{agent_session_id: "agent_gw_1", status: :running}} =
              SessionRegistry.fetch("gw_1")
 
     assert_receive {:gateway_event, event}
@@ -93,7 +93,7 @@ defmodule Prehen.Gateway.SessionWorkerTest do
     assert event.metadata == %{}
   end
 
-  test "removes registry route metadata when worker terminates after transport failure" do
+  test "retains terminal registry metadata when worker terminates after transport failure" do
     assert {:ok, pid} =
              SessionWorker.start_link(
                gateway_session_id: "gw_cleanup",
@@ -108,7 +108,12 @@ defmodule Prehen.Gateway.SessionWorkerTest do
     Process.exit(transport_pid, :kill)
 
     assert_receive {:DOWN, ^monitor_ref, :process, ^pid, _reason}, 2_000
-    assert {:error, :not_found} = SessionRegistry.fetch("gw_cleanup")
+
+    assert {:ok, session} = SessionRegistry.fetch("gw_cleanup")
+    assert session.status == :crashed
+    assert session.worker_pid == nil
+    assert session.agent_name == "fake_stdio"
+    assert session.agent_session_id == "agent_gw_cleanup"
   end
 
   test "stops started transport when init fails after transport start" do

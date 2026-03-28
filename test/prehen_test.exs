@@ -46,12 +46,17 @@ defmodule PrehenTest do
 
     assert {:ok, status} = Prehen.session_status(session_id)
     assert status.session_id == session_id
-    assert status.status == :attached
+    assert status.status == :running
     assert status.agent_name == "fake_stdio"
     assert is_binary(status.agent_session_id)
 
     assert :ok = Prehen.stop_session(session_id)
-    assert {:error, %{type: :session_status_failed}} = Prehen.session_status(session_id)
+
+    assert {:ok, stopped_status} = Prehen.session_status(session_id)
+    assert stopped_status.session_id == session_id
+    assert stopped_status.status == :stopped
+    assert stopped_status.agent_name == "fake_stdio"
+    assert is_binary(stopped_status.agent_session_id)
   end
 
   test "run/2 reports a gateway error for a missing reused session" do
