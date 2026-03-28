@@ -27,9 +27,9 @@
     bindEvents();
     setComposerDisabled(true);
     loadAgentsAndSessions().catch(function (error) {
-      if (!error || !error.handled) {
-        appendSystemNote(state.selectedSessionId, extractErrorMessage(error));
-      }
+      renderCreateError(extractErrorMessage(error));
+      renderSelectedSessionStatus("Inbox unavailable");
+      renderEmptyHistory("Unable to load inbox.");
     });
   });
 
@@ -147,29 +147,36 @@
     }
 
     state.selectedSessionId = sessionId;
+    clearSelectedSessionView(sessionId);
     renderSessionList();
-    renderSelectedSessionStatus("Loading session " + sessionId + "...");
-    setComposerDisabled(true);
+    renderCreateError("");
 
-    const result = await Promise.all([
-      fetchJson("/inbox/sessions/" + encodeURIComponent(sessionId)),
-      fetchJson("/inbox/sessions/" + encodeURIComponent(sessionId) + "/history")
-    ]);
+    try {
+      const result = await Promise.all([
+        fetchJson("/inbox/sessions/" + encodeURIComponent(sessionId)),
+        fetchJson("/inbox/sessions/" + encodeURIComponent(sessionId) + "/history")
+      ]);
 
-    const detail = result[0].session;
-    const history = result[1].history;
+      const detail = result[0].session;
+      const history = result[1].history;
 
-    applySelectedSessionSnapshot(sessionId, detail, history);
+      applySelectedSessionSnapshot(sessionId, detail, history);
 
-    if (isTerminalStatus(detail && detail.status)) {
-      state.desiredChannelSessionId = null;
-      leaveActiveChannel();
-      setConnectionState("");
-      setComposerDisabled(true);
-      return;
+      if (isTerminalStatus(detail && detail.status)) {
+        state.desiredChannelSessionId = null;
+        leaveActiveChannel();
+        setConnectionState("");
+        setComposerDisabled(true);
+        return;
+      }
+
+      await attachChannel(sessionId);
+    } catch (error) {
+      const handledError = new Error(extractErrorMessage(error));
+      handledError.handled = true;
+      handleSessionSelectionError(sessionId, handledError);
+      throw handledError;
     }
-
-    await attachChannel(sessionId);
   }
 
   async function attachChannel(sessionId) {
@@ -657,7 +664,7 @@
       return;
     }
 
-    appendSystemNote(sessionId, response.reason || "Message submit failed.");
+    appendSystemNote(sessionId, friendlySubmitErrorMessage(response));
     setComposerDisabled(true);
     state.desiredChannelSessionId = null;
     resolveJoinFailureFromHttp(sessionId, response);
@@ -932,6 +939,27 @@
     renderSelectedSessionStatus(formatSessionStatus(detail));
   }
 
+  function clearSelectedSessionView(sessionId) {
+    state.selectedSession = { session_id: sessionId };
+    state.selectedHistory = [];
+    state.selectedLiveStatus = null;
+    renderSelectedSessionStatus("Loading session " + sessionId + "...");
+    renderEmptyHistory("Loading session history...");
+    setComposerDisabled(true);
+  }
+
+  function handleSessionSelectionError(sessionId, error) {
+    if (sessionId !== state.selectedSessionId) {
+      return;
+    }
+
+    state.selectedSession = { session_id: sessionId };
+    state.selectedHistory = [];
+    renderSelectedSessionStatus("Unable to load session " + sessionId);
+    renderEmptyHistory(extractErrorMessage(error));
+    setComposerDisabled(true);
+  }
+
   function hydrateAssistantPreview(sessionId, history, detail) {
     const previews = {};
     let latestPreview = detail && detail.preview ? detail.preview : null;
@@ -1002,6 +1030,24 @@
 
   function isTerminalStatus(status) {
     return status === "stopped" || status === "crashed";
+  }
+
+  function friendlySubmitErrorMessage(response) {
+    const reason = response && response.reason;
+
+    if (reason === "session_read_only") {
+      return "Session is read-only.";
+    }
+
+    if (reason === "session_unavailable") {
+      return "Live connection unavailable. History is read-only.";
+    }
+
+    if (reason === "missing_text_field") {
+      return "Message text is required.";
+    }
+
+    return "Message submit failed.";
   }
 
   function nextRef() {

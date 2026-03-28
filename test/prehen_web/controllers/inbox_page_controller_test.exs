@@ -20,7 +20,15 @@ defmodule PrehenWeb.InboxPageControllerTest do
     assert body =~ ~s(<script src="/inbox.js")
   end
 
-  test "browser client source guards stale joins and reorders sessions by latest activity" do
+  test "serves the inbox static assets" do
+    js_conn = get(build_conn(), "/inbox.js")
+    css_conn = get(build_conn(), "/inbox.css")
+
+    assert response(js_conn, 200) =~ "DOMContentLoaded"
+    assert response(css_conn, 200) =~ ".inbox-shell"
+  end
+
+  test "browser client source handles bootstrap, session-switch, and user-facing errors" do
     source = File.read!(@inbox_js)
 
     assert source =~
@@ -42,5 +50,9 @@ defmodule PrehenWeb.InboxPageControllerTest do
 
     assert source =~ "sortSessionsByActivity()"
     assert source =~ ~r/function sortSessionsByActivity\(\) \{/
+    assert source =~ "renderCreateError(extractErrorMessage(error))"
+    assert source =~ "clearSelectedSessionView(sessionId);"
+    assert source =~ "friendlySubmitErrorMessage(response)"
+    assert source =~ "Session is read-only."
   end
 end
