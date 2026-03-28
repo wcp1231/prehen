@@ -478,10 +478,18 @@
 
     state.socket = socket;
 
-    socket.addEventListener("open", handleSocketOpen);
-    socket.addEventListener("close", handleSocketClose);
-    socket.addEventListener("error", handleSocketClose);
-    socket.addEventListener("message", handleSocketMessage);
+    socket.addEventListener("open", function () {
+      handleSocketOpen(socket);
+    });
+    socket.addEventListener("close", function () {
+      handleSocketClose(socket);
+    });
+    socket.addEventListener("error", function () {
+      handleSocketClose(socket);
+    });
+    socket.addEventListener("message", function (event) {
+      handleSocketMessage(socket, event);
+    });
 
     return waitForSocketOpen();
   }
@@ -509,13 +517,21 @@
     });
   }
 
-  function handleSocketOpen() {
+  function handleSocketOpen(socket) {
+    if (socket !== state.socket) {
+      return;
+    }
+
     state.socketOpen = true;
     state.reconnectAttempt = 0;
     startHeartbeat();
   }
 
-  function handleSocketClose() {
+  function handleSocketClose(socket) {
+    if (socket !== state.socket) {
+      return;
+    }
+
     const hadDesiredSession = state.desiredChannelSessionId;
 
     state.socketOpen = false;
@@ -533,7 +549,11 @@
     }
   }
 
-  function handleSocketMessage(event) {
+  function handleSocketMessage(socket, event) {
+    if (socket !== state.socket) {
+      return;
+    }
+
     let payload;
 
     try {

@@ -20,7 +20,7 @@ defmodule PrehenWeb.InboxPageControllerTest do
     assert body =~ ~s(<script src="/inbox.js")
   end
 
-  test "browser client source scopes system notes and merges assistant preview text" do
+  test "browser client source guards stale sockets and preserves session-scoped helpers" do
     source = File.read!(@inbox_js)
 
     assert source =~
@@ -31,5 +31,11 @@ defmodule PrehenWeb.InboxPageControllerTest do
     assert source =~ ~r/function appendSystemNote\(sessionId, text\) \{(?s:.*?)session_id: sessionId/
     assert source =~ "entry.session_id === sessionId"
     assert source =~ "function updateAssistantPreview(sessionId, messageId, text)"
+    assert source =~ ~r/socket\.addEventListener\("open", function \(\) \{\s*handleSocketOpen\(socket\);/
+    assert source =~ ~r/socket\.addEventListener\("close", function \(\) \{\s*handleSocketClose\(socket\);/
+    assert source =~ ~r/socket\.addEventListener\("message", function \(event\) \{\s*handleSocketMessage\(socket, event\);/
+    assert source =~ ~r/function handleSocketOpen\(socket\) \{(?s:.*?)if \(socket !== state\.socket\) \{\s*return;\s*\}/
+    assert source =~ ~r/function handleSocketClose\(socket\) \{(?s:.*?)if \(socket !== state\.socket\) \{\s*return;\s*\}/
+    assert source =~ ~r/function handleSocketMessage\(socket, event\) \{(?s:.*?)if \(socket !== state\.socket\) \{\s*return;\s*\}/
   end
 end
