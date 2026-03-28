@@ -41,6 +41,12 @@ defmodule Prehen.Gateway.InboxProjection do
   @spec agent_delta(map()) :: :ok | {:error, :invalid_attrs | :not_found}
   def agent_delta(attrs), do: GenServer.call(__MODULE__, {:agent_delta, attrs})
 
+  @spec agent_completed(map()) :: :ok | {:error, :invalid_attrs | :not_found}
+  def agent_completed(attrs), do: GenServer.call(__MODULE__, {:agent_completed, attrs})
+
+  @spec session_stopped(map()) :: :ok | {:error, :invalid_attrs | :not_found}
+  def session_stopped(attrs), do: GenServer.call(__MODULE__, {:session_stopped, attrs})
+
   @spec fetch_session(String.t()) :: {:ok, session_row()} | {:error, :not_found}
   def fetch_session(session_id), do: GenServer.call(__MODULE__, {:fetch_session, session_id})
 
@@ -119,7 +125,7 @@ defmodule Prehen.Gateway.InboxProjection do
             next_state
             |> ensure_history(session_id)
             |> append_history(session_id, entry)
-            |> update_session_row(session_id, entry)
+            |> update_session_row(session_id, entry, status: :running)
 
           {:reply, :ok, next_state}
       end
@@ -146,6 +152,40 @@ defmodule Prehen.Gateway.InboxProjection do
             |> merge_assistant_delta(session_id, message_id, text, timestamp)
             |> update_session_from_latest_history(session_id)
 
+          {:reply, :ok, next_state}
+      end
+    else
+      :error -> {:reply, {:error, :invalid_attrs}, state}
+      {:error, :invalid_attrs} -> {:reply, {:error, :invalid_attrs}, state}
+    end
+  end
+
+  def handle_call({:agent_completed, attrs}, _from, state) do
+    with {:ok, session_id} <- fetch_required_binary(attrs, :session_id),
+         {:ok, _message_id} <- fetch_required_binary(attrs, :message_id) do
+      case Map.has_key?(state.sessions, session_id) do
+        false ->
+          {:reply, {:error, :not_found}, state}
+
+        true ->
+          next_state = update_session_status(state, session_id, :idle)
+          {:reply, :ok, next_state}
+      end
+    else
+      :error -> {:reply, {:error, :invalid_attrs}, state}
+      {:error, :invalid_attrs} -> {:reply, {:error, :invalid_attrs}, state}
+    end
+  end
+
+  def handle_call({:session_stopped, attrs}, _from, state) do
+    with {:ok, session_id} <- fetch_required_binary(attrs, :session_id),
+         {:ok, status} <- fetch_terminal_status(attrs) do
+      case Map.has_key?(state.sessions, session_id) do
+        false ->
+          {:reply, {:error, :not_found}, state}
+
+        true ->
+          next_state = update_session_status(state, session_id, status)
           {:reply, :ok, next_state}
       end
     else
@@ -213,10 +253,14 @@ defmodule Prehen.Gateway.InboxProjection do
     end)
   end
 
-  defp update_session_row(state, session_id, entry) do
+  defp update_session_row(state, session_id, entry, opts \\ []) do
     update_in(state.sessions[session_id], fn
       nil -> nil
-      row -> %{row | preview: entry.text, last_event_at: entry.timestamp}
+      row ->
+        row
+        |> Map.put(:preview, entry.text)
+        |> Map.put(:last_event_at, entry.timestamp)
+        |> maybe_put_status(Keyword.get(opts, :status))
     end)
   end
 
@@ -245,6 +289,16 @@ defmodule Prehen.Gateway.InboxProjection do
   end
 
   defp assistant_message_match?(_entry, _target_message_id), do: false
+
+  defp update_session_status(state, session_id, status) do
+    update_in(state.sessions[session_id], fn
+      nil -> nil
+      row -> %{row | status: status}
+    end)
+  end
+
+  defp maybe_put_status(row, nil), do: row
+  defp maybe_put_status(row, status), do: Map.put(row, :status, status)
 
   defp fetch_required_binary(attrs, key) when is_map(attrs) do
     case Map.fetch(attrs, key) do
@@ -283,4 +337,13 @@ defmodule Prehen.Gateway.InboxProjection do
   end
 
   defp validate_optional_agent_name(_attrs), do: {:error, :invalid_attrs}
+
+  defp fetch_terminal_status(attrs) when is_map(attrs) do
+    case Map.get(attrs, :status, :stopped) do
+      status when status in [:stopped, :crashed] -> {:ok, status}
+      _ -> {:error, :invalid_attrs}
+    end
+  end
+
+  defp fetch_terminal_status(_attrs), do: {:error, :invalid_attrs}
 end

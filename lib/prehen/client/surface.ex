@@ -99,7 +99,13 @@ defmodule Prehen.Client.Surface do
       :ok
     else
       {:error, :not_found} ->
-        {:error, error_payload(:session_stop_failed, :not_found)}
+        case SessionRegistry.fetch(session_id) do
+          {:ok, %{status: status}} when status in [:stopped, :crashed] ->
+            :ok
+
+          _ ->
+            {:error, error_payload(:session_stop_failed, :not_found)}
+        end
 
       {:error, reason} ->
         {:error, error_payload(:session_stop_failed, reason)}

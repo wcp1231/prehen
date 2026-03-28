@@ -39,7 +39,7 @@ defmodule Prehen.Gateway.InboxProjectionTest do
     assert {:ok, row} = InboxProjection.fetch_session("gw_inbox_1")
     assert row.session_id == "gw_inbox_1"
     assert row.agent_name == "fake_stdio"
-    assert row.status == :attached
+    assert row.status == :running
     assert row.created_at == 1_774_625_000_000
     assert is_integer(row.last_event_at)
     assert row.last_event_at >= user_last_event_at
@@ -49,7 +49,7 @@ defmodule Prehen.Gateway.InboxProjectionTest do
              %{
                session_id: "gw_inbox_1",
                agent_name: "fake_stdio",
-               status: :attached,
+               status: :running,
                created_at: 1_774_625_000_000,
                last_event_at: last_event_at,
                preview: "hi"
@@ -223,7 +223,7 @@ defmodule Prehen.Gateway.InboxProjectionTest do
              %{
                session_id: "gw_duplicate",
                agent_name: "fake_stdio",
-               status: :attached,
+               status: :running,
                created_at: 1_774_625_000_000,
                last_event_at: last_event_at,
                preview: "hello"
@@ -231,6 +231,58 @@ defmodule Prehen.Gateway.InboxProjectionTest do
            ] = InboxProjection.list_sessions()
 
     assert last_event_at == row.last_event_at
+  end
+
+  test "keeps terminal session history readable after stop" do
+    assert :ok =
+             InboxProjection.session_started(%{
+               session_id: "gw_terminal",
+               agent_name: "fake_stdio",
+               created_at: 1_774_625_000_000
+             })
+
+    assert :ok =
+             InboxProjection.user_message(%{
+               session_id: "gw_terminal",
+               message_id: "request_terminal",
+               text: "hello"
+             })
+
+    assert :ok = InboxProjection.session_stopped(%{session_id: "gw_terminal"})
+
+    assert {:ok, row} = InboxProjection.fetch_session("gw_terminal")
+    assert row.status == :stopped
+
+    assert {:ok, history} = InboxProjection.fetch_history("gw_terminal")
+    assert Enum.any?(history, &(&1.kind == :user_message))
+  end
+
+  test "transitions from attached to running to idle for one request" do
+    assert :ok =
+             InboxProjection.session_started(%{
+               session_id: "gw_status",
+               agent_name: "fake_stdio",
+               created_at: 1_774_625_000_000
+             })
+
+    assert :ok =
+             InboxProjection.user_message(%{
+               session_id: "gw_status",
+               message_id: "request_status",
+               text: "hello"
+             })
+
+    assert {:ok, row} = InboxProjection.fetch_session("gw_status")
+    assert row.status == :running
+
+    assert :ok =
+             InboxProjection.agent_completed(%{
+               session_id: "gw_status",
+               message_id: "request_status"
+             })
+
+    assert {:ok, row} = InboxProjection.fetch_session("gw_status")
+    assert row.status == :idle
   end
 
   test "rejects unknown-session events without creating orphaned history" do

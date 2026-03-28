@@ -6,6 +6,7 @@ defmodule Prehen.Gateway.SessionWorker do
   alias Prehen.Agents.Envelope
   alias Prehen.Agents.Profile
   alias Prehen.Gateway.Router
+  alias Prehen.Gateway.InboxProjection
   alias Prehen.Gateway.SessionRegistry
   alias Prehen.Observability.TraceCollector
 
@@ -51,6 +52,7 @@ defmodule Prehen.Gateway.SessionWorker do
     requested_agent_name = Keyword.get(opts, :agent_name)
     test_pid = Keyword.get(opts, :test_pid)
     workspace = Keyword.get(opts, :workspace)
+    now_ms = System.system_time(:millisecond)
 
     with {:ok, profile} <- Router.route(agent_name: requested_agent_name),
          {:ok, transport_module} <- transport_module(profile) do
@@ -66,6 +68,13 @@ defmodule Prehen.Gateway.SessionWorker do
                      status: :attached
                    }) do
                 :ok ->
+                  :ok =
+                    InboxProjection.session_started(%{
+                      session_id: gateway_session_id,
+                      agent_name: profile.name,
+                      created_at: now_ms
+                    })
+
                   TraceCollector.record_sync(%{
                     type: "agent.started",
                     session_id: gateway_session_id,
@@ -112,7 +121,17 @@ defmodule Prehen.Gateway.SessionWorker do
     message = Map.put(attrs, :agent_session_id, state.agent_session_id)
 
     case state.transport_module.send_message(state.transport, message) do
-      :ok -> {:reply, :ok, state}
+      :ok ->
+        :ok =
+          SessionRegistry.put(%{
+            gateway_session_id: state.gateway_session_id,
+            status: :running
+          })
+
+        maybe_project_user_message(state.gateway_session_id, message)
+
+        {:reply, :ok, state}
+
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
@@ -133,21 +152,29 @@ defmodule Prehen.Gateway.SessionWorker do
       })
 
     dispatch_event(state, event)
+    project_transport_frame(state.gateway_session_id, type, payload)
     {:noreply, %{state | seq: state.seq + 1}}
   end
 
-  def handle_info({:transport_error, _reason}, state) do
-    {:stop, :normal, state}
+  def handle_info({:transport_error, reason}, state) do
+    {:stop, {:transport_error, reason}, state}
   end
 
-  def handle_info({:EXIT, transport, _reason}, %{transport: transport} = state) do
-    {:stop, :normal, state}
+  def handle_info({:EXIT, transport, reason}, %{transport: transport} = state) do
+    case reason do
+      :normal -> {:stop, :normal, state}
+      :shutdown -> {:stop, :shutdown, state}
+      {:shutdown, _} = shutdown -> {:stop, shutdown, state}
+      _ -> {:stop, {:transport_exit, reason}, state}
+    end
   end
 
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl true
-  def terminate(_reason, state) do
+  def terminate(reason, state) do
+    terminal_status = terminal_status(reason)
+
     TraceCollector.record_sync(%{
       type: "agent.stopped",
       session_id: state.gateway_session_id,
@@ -156,8 +183,20 @@ defmodule Prehen.Gateway.SessionWorker do
       agent_session_id: state.agent_session_id
     })
 
+    :ok =
+      InboxProjection.session_stopped(%{
+        session_id: state.gateway_session_id,
+        status: terminal_status
+      })
+
+    :ok =
+      SessionRegistry.put(%{
+        gateway_session_id: state.gateway_session_id,
+        status: terminal_status,
+        worker_pid: nil
+      })
+
     safe_stop_transport(state.transport_module, state.transport)
-    safe_delete_registry_route(state.gateway_session_id)
 
     :ok
   end
@@ -208,26 +247,88 @@ defmodule Prehen.Gateway.SessionWorker do
 
   defp safe_stop_transport(_transport_module, _transport), do: :ok
 
-  defp safe_delete_registry_route(gateway_session_id) when is_binary(gateway_session_id) do
-    try do
-      SessionRegistry.delete(gateway_session_id)
-      :ok
-    rescue
-      _error -> :ok
-    catch
-      :exit, _reason -> :ok
+  defp project_transport_frame(session_id, "session.output.delta", payload) when is_map(payload) do
+    with {:ok, message_id} <- fetch_optional_binary(payload, "message_id"),
+         {:ok, text} <- fetch_optional_binary(payload, "text") do
+      InboxProjection.agent_delta(%{
+        session_id: session_id,
+        message_id: message_id,
+        text: text
+      })
+    else
+      _ -> :ok
     end
   end
 
+  defp project_transport_frame(session_id, "session.output.completed", payload) when is_map(payload) do
+    with {:ok, message_id} <- fetch_optional_binary(payload, "message_id") do
+      :ok =
+        SessionRegistry.put(%{
+          gateway_session_id: session_id,
+          status: :idle
+        })
+
+      InboxProjection.agent_completed(%{
+        session_id: session_id,
+        message_id: message_id
+      })
+    else
+      _ -> :ok
+    end
+  end
+
+  defp project_transport_frame(_session_id, _type, _payload), do: :ok
+
   defp frame_value(map, key) when is_binary(key) do
-    atom_key =
-      case key do
-        "type" -> :type
-        "payload" -> :payload
-        "agent_session_id" -> :agent_session_id
-      end
+    atom_key = String.to_existing_atom(key)
 
     Map.get(map, key) || Map.get(map, atom_key)
+  end
+
+  defp extract_user_text(parts) when is_list(parts) do
+    parts
+    |> Enum.flat_map(fn
+      %{type: "text", text: text} when is_binary(text) -> [text]
+      %{"type" => "text", "text" => text} when is_binary(text) -> [text]
+      _ -> []
+    end)
+    |> Enum.join("")
+  end
+
+  defp extract_user_text(_parts), do: ""
+
+  defp maybe_project_user_message(session_id, message) when is_map(message) do
+    case Map.get(message, :message_id) do
+      message_id when is_binary(message_id) and message_id != "" ->
+        InboxProjection.user_message(%{
+          session_id: session_id,
+          message_id: message_id,
+          text: extract_user_text(Map.get(message, :parts, []))
+        })
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp maybe_project_user_message(_session_id, _message), do: :ok
+
+  defp fetch_optional_binary(map, key) when is_map(map) do
+    case Map.get(map, key) || Map.get(map, String.to_existing_atom(key)) do
+      value when is_binary(value) and value != "" -> {:ok, value}
+      _ -> :error
+    end
+  rescue
+    ArgumentError -> :error
+  end
+
+  defp terminal_status(reason) do
+    case reason do
+      :normal -> :stopped
+      :shutdown -> :stopped
+      {:shutdown, _} -> :stopped
+      _ -> :crashed
+    end
   end
 
   defp gen_gateway_session_id do

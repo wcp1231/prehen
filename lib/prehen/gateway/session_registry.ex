@@ -31,7 +31,14 @@ defmodule Prehen.Gateway.SessionRegistry do
   @impl true
   def handle_call({:put, attrs}, _from, state) do
     gateway_session_id = Map.fetch!(attrs, :gateway_session_id)
-    updated = Map.put(state, gateway_session_id, Map.delete(attrs, :gateway_session_id))
+    updated =
+      Map.update(
+        state,
+        gateway_session_id,
+        Map.delete(attrs, :gateway_session_id),
+        &Map.merge(&1, Map.delete(attrs, :gateway_session_id))
+      )
+
     {:reply, :ok, updated}
   end
 
@@ -48,6 +55,10 @@ defmodule Prehen.Gateway.SessionRegistry do
 
   def handle_call({:fetch_worker, gateway_session_id}, _from, state) do
     case Map.fetch(state, gateway_session_id) do
+      {:ok, %{status: status}}
+      when status in [:stopped, :crashed] ->
+        {:reply, {:error, :not_found}, state}
+
       {:ok, %{worker_pid: worker_pid}} when is_pid(worker_pid) ->
         if Process.alive?(worker_pid) do
           {:reply, {:ok, worker_pid}, state}

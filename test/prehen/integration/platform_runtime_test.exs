@@ -4,11 +4,13 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
   alias Prehen.Agents.Profile
   alias Prehen.Agents.Registry
   alias Prehen.Client.Surface
+  alias Prehen.Gateway.InboxProjection
   import Phoenix.ConnTest
 
   @endpoint PrehenWeb.Endpoint
 
   setup do
+    InboxProjection.reset()
     registry_pid = Process.whereis(Registry)
     original = :sys.get_state(registry_pid)
 
@@ -95,4 +97,57 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
     assert {:ok, events} = Prehen.Trace.for_session(gateway_session_id)
     assert Enum.any?(events, &(&1.type == "agent.started"))
   end
+
+  test "projects live status transitions and retains history after stop" do
+    assert {:ok, %{session_id: session_id}} = Surface.create_session(agent: "fake_stdio")
+
+    assert {:ok, row} = InboxProjection.fetch_session(session_id)
+    assert row.status == :attached
+
+    assert {:ok, %{request_id: request_id}} = Surface.submit_message(session_id, "hello inbox")
+
+    assert {:ok, row} =
+             wait_until(fn ->
+               case InboxProjection.fetch_session(session_id) do
+                 {:ok, %{status: :idle} = row} -> {:ok, row}
+                 _ -> :retry
+               end
+             end)
+
+    assert row.preview == "hi"
+
+    assert :ok = Surface.stop_session(session_id)
+
+    assert {:ok, row} =
+             wait_until(fn ->
+               case InboxProjection.fetch_session(session_id) do
+                 {:ok, %{status: :stopped} = row} -> {:ok, row}
+                 _ -> :retry
+               end
+             end)
+
+    assert row.status == :stopped
+
+    assert {:ok, history} = InboxProjection.fetch_history(session_id)
+
+    assert Enum.map(history, &Map.take(&1, [:kind, :message_id, :text])) == [
+             %{kind: :user_message, message_id: request_id, text: "hello inbox"},
+             %{kind: :assistant_message, message_id: request_id, text: "hi"}
+           ]
+  end
+
+  defp wait_until(fun, attempts \\ 20)
+
+  defp wait_until(fun, attempts) when attempts > 0 do
+    case fun.() do
+      {:ok, value} ->
+        {:ok, value}
+
+      :retry ->
+        Process.sleep(25)
+        wait_until(fun, attempts - 1)
+    end
+  end
+
+  defp wait_until(_fun, 0), do: {:error, :timeout}
 end

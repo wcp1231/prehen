@@ -41,13 +41,25 @@ defmodule FakeStdioAgent do
              "type" => "session.message",
              "payload" => %{"agent_session_id" => agent_session_id} = payload
            }} ->
+            message_id = payload["message_id"] || "message_1"
+
             IO.puts(
               Jason.encode!(%{
                 type: "session.output.delta",
                 payload: %{
                   agent_session_id: agent_session_id,
-                  message_id: payload["message_id"] || "message_1",
+                  message_id: message_id,
                   text: "hi"
+                }
+              })
+            )
+
+            IO.puts(
+              Jason.encode!(%{
+                type: "session.output.completed",
+                payload: %{
+                  agent_session_id: agent_session_id,
+                  message_id: message_id
                 }
               })
             )
