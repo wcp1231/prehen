@@ -6,6 +6,7 @@ defmodule Prehen.Integration.WebInboxTest do
   alias Prehen.Agents.Registry
   alias Prehen.Gateway.InboxProjection
   import Phoenix.ConnTest
+  import Phoenix.ChannelTest
 
   @endpoint PrehenWeb.Endpoint
 
@@ -145,6 +146,35 @@ defmodule Prehen.Integration.WebInboxTest do
 
     assert %{"session" => %{"session_id" => ^session_id, "status" => "stopped"}} =
              json_response(conn, 200)
+  end
+
+  test "web inbox flow can create over HTTP and submit over SessionChannel" do
+    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "fake_stdio"})
+    assert %{"session_id" => session_id} = json_response(conn, 201)
+
+    {:ok, _, socket} =
+      socket(PrehenWeb.UserSocket)
+      |> subscribe_and_join(PrehenWeb.SessionChannel, "session:#{session_id}")
+
+    ref = push(socket, "submit", %{"text" => "hello"})
+    assert_reply(ref, :ok, %{"request_id" => request_id})
+
+    assert_push("event", %{
+      "type" => "session.output.delta",
+      "payload" => %{"message_id" => ^request_id}
+    })
+
+    conn = delete(build_conn(), "/inbox/sessions/#{session_id}")
+    assert response(conn, 204)
+
+    conn = get(build_conn(), "/inbox/sessions/#{session_id}")
+
+    assert %{"session" => %{"session_id" => ^session_id, "status" => "stopped"}} =
+             json_response(conn, 200)
+
+    conn = get(build_conn(), "/inbox/sessions/#{session_id}/history")
+    assert %{"history" => history} = json_response(conn, 200)
+    assert history != []
   end
 
   test "stops a live inbox session even when projection state is missing" do
