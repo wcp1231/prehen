@@ -7,21 +7,43 @@ defmodule PrehenWeb.SessionChannel do
 
   @impl true
   def join("session:" <> session_id, _params, socket) do
-    with {:ok, worker_pid} <- SessionRegistry.fetch_worker(session_id),
-         {:ok, session} <- SessionRegistry.fetch(session_id) do
-        :ok = Phoenix.PubSub.subscribe(Prehen.PubSub, "session:#{session_id}")
-        monitor_ref = Process.monitor(worker_pid)
+    case SessionRegistry.fetch_worker(session_id) do
+      {:ok, worker_pid} ->
+        with {:ok, session} <- SessionRegistry.fetch(session_id) do
+          :ok = Phoenix.PubSub.subscribe(Prehen.PubSub, "session:#{session_id}")
+          monitor_ref = Process.monitor(worker_pid)
 
-        socket =
-          socket
-          |> assign(:session_id, session_id)
-          |> assign(:worker_pid, worker_pid)
-          |> assign(:monitor_ref, monitor_ref)
+          socket =
+            socket
+            |> assign(:session_id, session_id)
+            |> assign(:worker_pid, worker_pid)
+            |> assign(:monitor_ref, monitor_ref)
 
-        {:ok, join_payload(session_id, session), socket}
-    else
+          {:ok, join_payload(session_id, session), socket}
+        else
+          {:error, :not_found} ->
+            {:error, %{"reason" => "session_not_found"}}
+
+          {:error, reason} ->
+            {:error, %{"reason" => inspect(reason)}}
+        end
+
       {:error, :not_found} ->
-        {:error, %{"reason" => "session_not_found"}}
+        case SessionRegistry.fetch(session_id) do
+          {:ok, %{status: status}} when status in [:stopped, :crashed] ->
+            {:error,
+             %{
+               "reason" => "session_read_only",
+               "session_id" => session_id,
+               "status" => to_string(status)
+             }}
+
+          {:error, :not_found} ->
+            {:error, %{"reason" => "session_not_found"}}
+
+          {:ok, _session} ->
+            {:error, %{"reason" => "session_not_found"}}
+        end
 
       {:error, reason} ->
         {:error, %{"reason" => inspect(reason)}}

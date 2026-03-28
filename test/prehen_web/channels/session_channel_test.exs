@@ -101,6 +101,28 @@ defmodule PrehenWeb.SessionChannelTest do
              |> subscribe_and_join(PrehenWeb.SessionChannel, "session:missing")
   end
 
+  test "returns a read-only join error for retained terminal sessions" do
+    :ok =
+      SessionRegistry.put(%{
+        gateway_session_id: "gw_read_only",
+        worker_pid: nil,
+        agent_name: "fake_stdio",
+        agent_session_id: "agent_gw_read_only",
+        status: :crashed
+      })
+
+    on_exit(fn -> SessionRegistry.delete("gw_read_only") end)
+
+    assert {:error,
+            %{
+              "reason" => "session_read_only",
+              "session_id" => "gw_read_only",
+              "status" => "crashed"
+            }} =
+             socket(PrehenWeb.UserSocket)
+             |> subscribe_and_join(PrehenWeb.SessionChannel, "session:gw_read_only")
+  end
+
   test "fails attach when registry route points to a dead worker" do
     worker_pid = spawn(fn -> :ok end)
     ref = Process.monitor(worker_pid)
@@ -175,7 +197,12 @@ defmodule PrehenWeb.SessionChannelTest do
       |> subscribe_and_join(PrehenWeb.SessionChannel, "session:#{session_id}")
 
     ref = push(socket, "submit", %{"text" => "hello"})
-    assert_reply ref, :ok, %{"request_id" => _request_id}
+    assert_reply ref, :ok, %{"request_id" => request_id}
+
+    assert_push "event", %{
+      "type" => "session.output.delta",
+      "payload" => %{"message_id" => ^request_id}
+    }
   end
 
   test "rejects malformed submit text with a structured error" do
