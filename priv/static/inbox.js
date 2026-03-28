@@ -26,7 +26,9 @@
     bindEvents();
     setComposerDisabled(true);
     loadAgentsAndSessions().catch(function (error) {
-      appendSystemNote(state.selectedSessionId, extractErrorMessage(error));
+      if (!error || !error.handled) {
+        appendSystemNote(state.selectedSessionId, extractErrorMessage(error));
+      }
     });
   });
 
@@ -58,7 +60,9 @@
       }
 
       selectSession(button.getAttribute("data-session-id")).catch(function (error) {
-        appendSystemNote(state.selectedSessionId, extractErrorMessage(error));
+        if (!error || !error.handled) {
+          appendSystemNote(state.selectedSessionId, extractErrorMessage(error));
+        }
       });
     });
 
@@ -72,7 +76,9 @@
       }
 
       submitMessage(state.selectedSessionId, text).catch(function (error) {
-        appendSystemNote(state.selectedSessionId, extractErrorMessage(error));
+        if (!error || !error.handled) {
+          appendSystemNote(state.selectedSessionId, extractErrorMessage(error));
+        }
       });
     });
   }
@@ -151,14 +157,7 @@
     const detail = result[0].session;
     const history = result[1].history;
 
-    state.selectedSession = detail;
-    state.selectedHistory = Array.isArray(history) ? history.slice() : [];
-    state.selectedLiveStatus = detail && detail.status;
-
-    upsertSessionRow(detail);
-    renderSessionList();
-    renderHistory();
-    renderSelectedSessionStatus(formatSessionStatus(detail));
+    applySelectedSessionSnapshot(sessionId, detail, history);
 
     if (isTerminalStatus(detail && detail.status)) {
       state.desiredChannelSessionId = null;
@@ -242,7 +241,8 @@
     upsertSessionRow({
       session_id: sessionId,
       status: "running",
-      preview: text
+      preview: text,
+      last_event_at: Date.now()
     });
     renderSessionList();
   }
@@ -330,6 +330,7 @@
       const title = document.createElement("div");
       const meta = document.createElement("div");
       const preview = document.createElement("div");
+      const updated = document.createElement("div");
 
       button.type = "button";
       button.className = "session-row" + (session.session_id === state.selectedSessionId ? " selected" : "");
@@ -346,11 +347,15 @@
       meta.className = "session-meta";
       meta.textContent = session.session_id;
 
+      updated.className = "session-updated";
+      updated.textContent = formatSessionTimestamp(session.last_event_at || session.created_at);
+
       preview.className = "session-preview";
       preview.textContent = session.preview || "No messages yet";
 
       button.appendChild(title);
       button.appendChild(meta);
+      button.appendChild(updated);
       button.appendChild(preview);
       item.appendChild(button);
       dom.sessionList.appendChild(item);
@@ -595,7 +600,9 @@
       handleSubmitError(pending.sessionId, body.response || {});
     }
 
-    pending.reject(new Error(reason));
+    const error = new Error(reason);
+    error.handled = true;
+    pending.reject(error);
   }
 
   function handleJoinError(sessionId, response) {
@@ -603,20 +610,18 @@
       return;
     }
 
+    state.desiredChannelSessionId = null;
+    leaveActiveChannel();
+    setComposerDisabled(true);
+
     if (response.reason === "session_read_only") {
-      state.selectedLiveStatus = response.status || "stopped";
-      updateSelectedStatus(state.selectedLiveStatus);
-      setConnectionState("");
-      setComposerDisabled(true);
       appendSystemNote(sessionId, "Session is read-only.");
-      fetchSelectedSessionOverHttp(sessionId);
+      resolveJoinFailureFromHttp(sessionId, response);
       return;
     }
 
-    setConnectionState("disconnected");
-    setComposerDisabled(true);
-    appendSystemNote(sessionId, "Live connection unavailable.");
-    scheduleReattach(sessionId);
+    appendSystemNote(sessionId, "Live connection unavailable. History is read-only.");
+    resolveJoinFailureFromHttp(sessionId, response);
   }
 
   function handleSubmitError(sessionId, response) {
@@ -625,13 +630,9 @@
     }
 
     appendSystemNote(sessionId, response.reason || "Message submit failed.");
-
-    if (response.reason === "session_read_only") {
-      state.selectedLiveStatus = response.status || "stopped";
-      updateSelectedStatus(state.selectedLiveStatus);
-      setComposerDisabled(true);
-      fetchSelectedSessionOverHttp(sessionId);
-    }
+    setComposerDisabled(true);
+    state.desiredChannelSessionId = null;
+    resolveJoinFailureFromHttp(sessionId, response);
   }
 
   function startHeartbeat() {
@@ -696,26 +697,15 @@
   }
 
   function fetchSelectedSessionOverHttp(sessionId) {
-    Promise.all([
+    return Promise.all([
       fetchJson("/inbox/sessions/" + encodeURIComponent(sessionId)),
       fetchJson("/inbox/sessions/" + encodeURIComponent(sessionId) + "/history")
-    ])
-      .then(function (result) {
-        if (state.selectedSessionId !== sessionId) {
-          return;
-        }
-
-        state.selectedSession = result[0].session;
-        state.selectedHistory = Array.isArray(result[1].history) ? result[1].history.slice() : [];
-        state.selectedLiveStatus = state.selectedSession.status;
-        upsertSessionRow(state.selectedSession);
-        renderSessionList();
-        renderHistory();
-        renderSelectedSessionStatus(formatSessionStatus(state.selectedSession));
-      })
-      .catch(function (error) {
-        appendSystemNote(sessionId, extractErrorMessage(error));
-      });
+    ]).then(function (result) {
+      return {
+        detail: result[0].session,
+        history: result[1].history
+      };
+    });
   }
 
   function updateSessionFromEvent(event) {
@@ -730,18 +720,22 @@
     if (event.type === "session.output.delta") {
       patch.status = "running";
       patch.preview = event.payload && event.payload.text;
+      patch.last_event_at = Date.now();
     }
 
     if (event.type === "session.output.completed") {
       patch.status = "idle";
+      patch.last_event_at = Date.now();
     }
 
     if (event.type === "session.ended") {
       patch.status = "stopped";
+      patch.last_event_at = Date.now();
     }
 
     if (event.type === "session.crashed") {
       patch.status = "crashed";
+      patch.last_event_at = Date.now();
     }
 
     upsertSessionRow(patch);
@@ -805,9 +799,11 @@
     }
 
     state.selectedSession.status = status;
+    state.selectedLiveStatus = status;
     upsertSessionRow({
       session_id: state.selectedSessionId,
-      status: status
+      status: status,
+      last_event_at: Date.now()
     });
     renderSelectedSessionStatus(formatSessionStatus(state.selectedSession));
   }
@@ -826,6 +822,84 @@
     return state.sessions.some(function (session) {
       return session.session_id === sessionId;
     });
+  }
+
+  function resolveJoinFailureFromHttp(sessionId, response) {
+    setConnectionState("");
+
+    return fetchSelectedSessionOverHttp(sessionId)
+      .then(function (snapshot) {
+        if (state.selectedSessionId !== sessionId) {
+          return;
+        }
+
+        applySelectedSessionSnapshot(sessionId, snapshot.detail, snapshot.history);
+
+        if (response && response.status && !snapshot.detail.status) {
+          state.selectedLiveStatus = response.status;
+        }
+
+        setComposerDisabled(true);
+      })
+      .catch(function (_error) {
+        if (state.selectedSessionId !== sessionId) {
+          return;
+        }
+
+        if (response && response.status) {
+          updateSelectedStatus(response.status);
+        }
+
+        setConnectionState("");
+        setComposerDisabled(true);
+      });
+  }
+
+  function applySelectedSessionSnapshot(sessionId, detail, history) {
+    if (state.selectedSessionId !== sessionId) {
+      return;
+    }
+
+    const systemNotes = state.selectedHistory.filter(function (entry) {
+      return entry.kind === "system_note";
+    });
+
+    state.selectedSession = detail;
+    state.selectedHistory = (Array.isArray(history) ? history.slice() : []).concat(systemNotes);
+    state.selectedLiveStatus = detail && detail.status;
+
+    upsertSessionRow(detail);
+    renderSessionList();
+    renderHistory();
+    renderSelectedSessionStatus(formatSessionStatus(detail));
+  }
+
+  function formatSessionTimestamp(timestamp) {
+    if (!timestamp) {
+      return "Updated unknown";
+    }
+
+    const date = new Date(timestamp);
+
+    if (Number.isNaN(date.getTime())) {
+      return "Updated unknown";
+    }
+
+    const deltaMs = Date.now() - date.getTime();
+
+    if (deltaMs < 60 * 1000) {
+      return "Updated just now";
+    }
+
+    if (deltaMs < 60 * 60 * 1000) {
+      return "Updated " + Math.floor(deltaMs / (60 * 1000)) + "m ago";
+    }
+
+    if (deltaMs < 24 * 60 * 60 * 1000) {
+      return "Updated " + Math.floor(deltaMs / (60 * 60 * 1000)) + "h ago";
+    }
+
+    return "Updated " + date.toLocaleString();
   }
 
   function isTerminalStatus(status) {

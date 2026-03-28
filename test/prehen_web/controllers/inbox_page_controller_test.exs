@@ -18,4 +18,14 @@ defmodule PrehenWeb.InboxPageControllerTest do
     assert body =~ "data-role=\"connection-state\""
     assert body =~ ~s(<script src="/inbox.js")
   end
+
+  test "browser client source includes retained-session and composer guard logic" do
+    source = File.read!("/Users/wenchunpeng/Hack/elixir/prehen/priv/static/inbox.js")
+
+    assert source =~
+             ~r/function handleSubmitError\(sessionId, response\) \{(?s:.*?)appendSystemNote\(sessionId, .*?\);(?s:.*?)setComposerDisabled\(true\);/
+
+    assert source =~ "resolveJoinFailureFromHttp"
+    assert source =~ "formatSessionTimestamp"
+  end
 end

@@ -62,6 +62,7 @@ button {
 .muted,
 .detail-subtitle,
 .session-meta,
+.session-updated,
 .placeholder,
 .create-error,
 .connection-state {
@@ -165,6 +166,11 @@ button:disabled {
   margin-top: 8px;
   color: #384450;
   font-size: 0.95rem;
+}
+
+.session-updated {
+  margin-top: 4px;
+  font-size: 0.85rem;
 }
 
 .detail {
