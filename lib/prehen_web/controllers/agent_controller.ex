@@ -4,12 +4,16 @@ defmodule PrehenWeb.AgentController do
   alias Prehen.Agents.Registry
 
   def index(conn, _params) do
+    profiles = Registry.all()
+    default_agent = profiles |> List.first() |> then(&if &1, do: &1.name, else: nil)
+
     agents =
-      Registry.all()
+      profiles
       |> Enum.map(fn profile ->
         %{
           agent: profile.name,
-          name: profile.name
+          name: profile.name,
+          default: profile.name == default_agent
         }
       end)
       |> Enum.sort_by(& &1.agent)

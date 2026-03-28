@@ -1,12 +1,24 @@
 defmodule Prehen.Integration.WebInboxTest do
   use ExUnit.Case, async: false
 
+  alias Prehen.Agents.Profile
+  alias Prehen.Agents.Registry
+  alias Prehen.Gateway.InboxProjection
   import Phoenix.ConnTest
 
   @endpoint PrehenWeb.Endpoint
 
   setup do
-    maybe_reset_inbox_projection()
+    InboxProjection.reset()
+    registry_pid = Process.whereis(Registry)
+    original = :sys.get_state(registry_pid)
+
+    set_registry([fake_profile()])
+
+    on_exit(fn ->
+      :sys.replace_state(registry_pid, fn _ -> original end)
+    end)
+
     :ok
   end
 
@@ -17,33 +29,129 @@ defmodule Prehen.Integration.WebInboxTest do
   end
 
   test "lists agents for the inbox page" do
-    fake_profile = %Prehen.Agents.Profile{
-      name: "fake_stdio",
-      command: ["mix", "run", "--no-start", "test/support/fake_stdio_agent.exs"]
-    }
-
-    registry_pid = Process.whereis(Prehen.Agents.Registry)
-    original = :sys.get_state(registry_pid)
-
-    :sys.replace_state(registry_pid, fn _ ->
-      %{ordered: [fake_profile], by_name: %{"fake_stdio" => fake_profile}}
-    end)
-
-    on_exit(fn ->
-      :sys.replace_state(registry_pid, fn _ -> original end)
-    end)
-
     conn = get(build_conn(), "/agents")
 
     assert %{"agents" => agents} = json_response(conn, 200)
-    assert [%{"agent" => "fake_stdio", "name" => "fake_stdio"}] = agents
+    assert [%{"agent" => "fake_stdio", "name" => "fake_stdio", "default" => true}] = agents
   end
 
-  defp maybe_reset_inbox_projection do
-    module = Prehen.Gateway.InboxProjection
+  test "returns an empty agent list when no agents are configured" do
+    set_registry([])
 
-    if Code.ensure_loaded?(module) and function_exported?(module, :reset, 0) do
-      apply(module, :reset, [])
+    conn = get(build_conn(), "/agents")
+
+    assert %{"agents" => []} = json_response(conn, 200)
+  end
+
+  test "supports create detail history and stop through inbox JSON endpoints" do
+    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "fake_stdio"})
+    assert %{"session_id" => session_id, "agent" => "fake_stdio"} = json_response(conn, 201)
+
+    conn = post(build_conn(), "/sessions/#{session_id}/messages", %{"text" => "hello inbox"})
+
+    assert %{"status" => "accepted", "session_id" => ^session_id, "request_id" => request_id} =
+             json_response(conn, 202)
+
+    assert {:ok, history_conn} =
+             wait_until(fn ->
+               conn = get(build_conn(), "/inbox/sessions/#{session_id}/history")
+
+               case json_response(conn, 200) do
+                 %{"history" => [_user, _assistant] = history} -> {:ok, history}
+                 _ -> :retry
+               end
+             end)
+
+    assert [
+             %{"kind" => "user_message", "message_id" => ^request_id, "text" => "hello inbox"},
+             %{"kind" => "assistant_message", "message_id" => ^request_id, "text" => "hi"}
+           ] = history_conn
+
+    conn = get(build_conn(), "/inbox/sessions/#{session_id}")
+    assert %{"session" => session} = json_response(conn, 200)
+    assert session["session_id"] == session_id
+    assert session["agent_name"] == "fake_stdio"
+    assert session["status"] in ["idle", "running", "attached"]
+
+    conn = delete(build_conn(), "/inbox/sessions/#{session_id}")
+    assert response(conn, 204) == ""
+
+    assert {:ok, detail_conn} =
+             wait_until(fn ->
+               conn = get(build_conn(), "/inbox/sessions/#{session_id}")
+
+               case json_response(conn, 200) do
+                 %{"session" => %{"status" => "stopped"} = session} -> {:ok, session}
+                 _ -> :retry
+               end
+             end)
+
+    assert detail_conn["session_id"] == session_id
+  end
+
+  test "returns a structured create failure when no agents are configured" do
+    set_registry([])
+
+    conn = post(build_conn(), "/inbox/sessions", %{})
+
+    assert %{"error" => %{"type" => "unprocessable_entity", "message" => message}} =
+             json_response(conn, 422)
+
+    assert message =~ ":no_agent_profiles_configured"
+  end
+
+  test "creates an inbox session with the default agent when agent is omitted" do
+    conn = post(build_conn(), "/inbox/sessions", %{})
+
+    assert %{"session_id" => _session_id, "agent" => "fake_stdio"} = json_response(conn, 201)
+  end
+
+  test "stopping a retained inbox session is idempotent" do
+    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "fake_stdio"})
+    assert %{"session_id" => session_id} = json_response(conn, 201)
+
+    conn = delete(build_conn(), "/inbox/sessions/#{session_id}")
+    assert response(conn, 204) == ""
+
+    conn = delete(build_conn(), "/inbox/sessions/#{session_id}")
+    assert response(conn, 204) == ""
+
+    conn = get(build_conn(), "/inbox/sessions/#{session_id}")
+
+    assert %{"session" => %{"session_id" => ^session_id, "status" => "stopped"}} =
+             json_response(conn, 200)
+  end
+
+  defp fake_profile do
+    %Profile{
+      name: "fake_stdio",
+      command: ["mix", "run", "--no-start", "test/support/fake_stdio_agent.exs"]
+    }
+  end
+
+  defp set_registry(profiles) do
+    registry_pid = Process.whereis(Registry)
+
+    :sys.replace_state(registry_pid, fn _ ->
+      %{
+        ordered: profiles,
+        by_name: Map.new(profiles, fn %Profile{name: name} = profile -> {name, profile} end)
+      }
+    end)
+  end
+
+  defp wait_until(fun, attempts \\ 20)
+
+  defp wait_until(fun, attempts) when attempts > 0 do
+    case fun.() do
+      {:ok, value} ->
+        {:ok, value}
+
+      :retry ->
+        Process.sleep(25)
+        wait_until(fun, attempts - 1)
     end
   end
+
+  defp wait_until(_fun, 0), do: {:error, :timeout}
 end

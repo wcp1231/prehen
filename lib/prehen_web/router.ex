@@ -4,14 +4,20 @@ defmodule PrehenWeb.Router do
   import Phoenix.Controller
 
   pipeline :api do
-    plug :accepts, ["json"]
+    plug(:accepts, ["json"])
   end
 
   scope "/", PrehenWeb do
-    pipe_through :api
+    pipe_through(:api)
 
-    resources "/sessions", SessionController, only: [:create, :show, :delete]
-    post "/sessions/:id/messages", SessionController, :create_message
-    get "/agents", AgentController, :index
+    get("/inbox/sessions", InboxController, :index)
+    post("/inbox/sessions", InboxController, :create)
+    get("/inbox/sessions/:id", InboxController, :show)
+    get("/inbox/sessions/:id/history", InboxController, :history)
+    delete("/inbox/sessions/:id", InboxController, :delete)
+
+    resources("/sessions", SessionController, only: [:create, :show, :delete])
+    post("/sessions/:id/messages", SessionController, :create_message)
+    get("/agents", AgentController, :index)
   end
 end
