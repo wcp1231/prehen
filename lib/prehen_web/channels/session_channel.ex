@@ -61,12 +61,7 @@ defmodule PrehenWeb.SessionChannel do
             {:reply, {:ok, %{"request_id" => ack.request_id}}, socket}
 
           {:error, _reason} ->
-            {:reply,
-             {:error,
-              %{
-                "reason" => "session_unavailable",
-                "session_id" => socket.assigns.session_id
-              }}, socket}
+            {:reply, {:error, submit_error_payload(socket.assigns.session_id)}, socket}
         end
 
       {:error, :missing_text_field} ->
@@ -134,5 +129,22 @@ defmodule PrehenWeb.SessionChannel do
       "status" => session |> Map.get(:status) |> to_string(),
       "agent_name" => Map.get(session, :agent_name)
     }
+  end
+
+  defp submit_error_payload(session_id) do
+    case SessionRegistry.fetch(session_id) do
+      {:ok, %{status: status}} when status in [:stopped, :crashed] ->
+        %{
+          "reason" => "session_read_only",
+          "session_id" => session_id,
+          "status" => to_string(status)
+        }
+
+      _ ->
+        %{
+          "reason" => "session_unavailable",
+          "session_id" => session_id
+        }
+    end
   end
 end

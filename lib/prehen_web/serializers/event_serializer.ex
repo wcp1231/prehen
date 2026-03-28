@@ -26,7 +26,7 @@ defmodule PrehenWeb.EventSerializer do
 
       converted =
         cond do
-          top_level? and runtime_specific_field?(str_key) and not inbox_browser_field?(str_key) ->
+          top_level? and runtime_specific_field?(str_key) ->
             :drop
 
           is_request_failed and str_key == "error" ->
@@ -135,11 +135,4 @@ defmodule PrehenWeb.EventSerializer do
   defp runtime_specific_field?("node"), do: true
   defp runtime_specific_field?("timestamp"), do: true
   defp runtime_specific_field?(_), do: false
-
-  # Explicitly pin the event fields the inbox browser depends on.
-  defp inbox_browser_field?("type"), do: true
-  defp inbox_browser_field?("gateway_session_id"), do: true
-  defp inbox_browser_field?("agent_session_id"), do: true
-  defp inbox_browser_field?("payload"), do: true
-  defp inbox_browser_field?(_), do: false
 end

@@ -241,7 +241,7 @@ defmodule PrehenWeb.SessionChannelTest do
     assert returned_socket.assigns.session_id == "missing_session"
   end
 
-  test "returns session unavailable for retained terminal sessions" do
+  test "returns session read-only for retained stopped sessions" do
     :ok =
       SessionRegistry.put(%{
         gateway_session_id: "gw_terminal",
@@ -258,10 +258,44 @@ defmodule PrehenWeb.SessionChannelTest do
       |> Phoenix.Socket.assign(:session_id, "gw_terminal")
 
     assert {:reply,
-            {:error, %{"reason" => "session_unavailable", "session_id" => "gw_terminal"}},
+            {:error,
+             %{
+               "reason" => "session_read_only",
+               "session_id" => "gw_terminal",
+               "status" => "stopped"
+             }},
             returned_socket} =
              PrehenWeb.SessionChannel.handle_in("submit", %{"text" => "hello"}, socket)
 
     assert returned_socket.assigns.session_id == "gw_terminal"
+  end
+
+  test "returns session read-only for retained crashed sessions" do
+    :ok =
+      SessionRegistry.put(%{
+        gateway_session_id: "gw_crashed_terminal",
+        worker_pid: nil,
+        agent_name: "fake_stdio",
+        agent_session_id: "agent_gw_crashed_terminal",
+        status: :crashed
+      })
+
+    on_exit(fn -> SessionRegistry.delete("gw_crashed_terminal") end)
+
+    socket =
+      socket(PrehenWeb.UserSocket, "user_1", %{})
+      |> Phoenix.Socket.assign(:session_id, "gw_crashed_terminal")
+
+    assert {:reply,
+            {:error,
+             %{
+               "reason" => "session_read_only",
+               "session_id" => "gw_crashed_terminal",
+               "status" => "crashed"
+             }},
+            returned_socket} =
+             PrehenWeb.SessionChannel.handle_in("submit", %{"text" => "hello"}, socket)
+
+    assert returned_socket.assigns.session_id == "gw_crashed_terminal"
   end
 end
