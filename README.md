@@ -37,18 +37,19 @@ mix deps.get
 
 ## Run
 
-The project still exposes a CLI entrypoint, but it now runs through the gateway-backed session flow:
+Start the local gateway service:
 
 ```bash
-mix escript.build
-./prehen run --agent coder "列出 lib 并读取 prehen.ex"
+mix prehen.server
 ```
+
+Then open `http://localhost:4000/inbox`.
+
+For a one-shot CLI run through the same gateway session flow:
 
 ```bash
 mix prehen.run --agent coder "列出 lib 并读取 prehen.ex"
 ```
-
-For the browser inbox UI, start the Phoenix server and open `/inbox`.
 
 ## CLI Options
 
