@@ -45,7 +45,9 @@ defmodule Prehen.Integration.WebInboxTest do
 
   test "supports create detail history and stop through inbox JSON endpoints" do
     conn = post(build_conn(), "/inbox/sessions", %{"agent" => "fake_stdio"})
-    assert %{"session_id" => session_id, "agent" => "fake_stdio"} = json_response(conn, 201)
+
+    assert %{"session_id" => session_id, "agent" => "fake_stdio", "status" => "attached"} =
+             json_response(conn, 201)
 
     conn = post(build_conn(), "/sessions/#{session_id}/messages", %{"text" => "hello inbox"})
 
@@ -103,12 +105,13 @@ defmodule Prehen.Integration.WebInboxTest do
   test "creates an inbox session with the default agent when agent is omitted" do
     conn = post(build_conn(), "/inbox/sessions", %{})
 
-    assert %{"session_id" => _session_id, "agent" => "fake_stdio"} = json_response(conn, 201)
+    assert %{"session_id" => _session_id, "agent" => "fake_stdio", "status" => "attached"} =
+             json_response(conn, 201)
   end
 
   test "stopping a retained inbox session is idempotent" do
     conn = post(build_conn(), "/inbox/sessions", %{"agent" => "fake_stdio"})
-    assert %{"session_id" => session_id} = json_response(conn, 201)
+    assert %{"session_id" => session_id, "status" => "attached"} = json_response(conn, 201)
 
     conn = delete(build_conn(), "/inbox/sessions/#{session_id}")
     assert response(conn, 204) == ""

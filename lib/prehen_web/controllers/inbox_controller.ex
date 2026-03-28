@@ -10,10 +10,16 @@ defmodule PrehenWeb.InboxController do
   end
 
   def create(conn, params) do
-    with {:ok, session} <- Inbox.create_session(build_session_opts(params)) do
+    with {:ok, %{session_id: session_id, agent: agent}} <-
+           Inbox.create_session(build_session_opts(params)),
+         {:ok, detail} <- Inbox.session_detail(session_id) do
       conn
       |> put_status(:created)
-      |> json(session)
+      |> json(%{
+        session_id: session_id,
+        agent: agent,
+        status: detail.status |> to_string()
+      })
     end
   end
 

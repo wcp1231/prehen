@@ -16,7 +16,6 @@ defmodule Prehen.Client.Surface do
 
   alias Prehen.Agent.EventBridge
   alias Prehen.Config
-  alias Prehen.Gateway.InboxProjection
   alias Prehen.Gateway.Router
   alias Prehen.Gateway.SessionRegistry
   alias Prehen.Gateway.SessionWorker
@@ -108,13 +107,7 @@ defmodule Prehen.Client.Surface do
             :ok
 
           _ ->
-            case InboxProjection.fetch_session(session_id) do
-              {:ok, %{status: status}} when status in [:stopped, :crashed] ->
-                :ok
-
-              _ ->
-                {:error, error_payload(:session_stop_failed, :not_found)}
-            end
+            {:error, error_payload(:session_stop_failed, :not_found)}
         end
 
       {:error, reason} ->
