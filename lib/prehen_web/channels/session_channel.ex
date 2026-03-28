@@ -30,19 +30,25 @@ defmodule PrehenWeb.SessionChannel do
 
   @impl true
   def handle_in("submit", %{"text" => text} = payload, socket) do
-    kind = payload |> Map.get("kind", "prompt") |> normalize_kind()
+    case normalize_submit_text(text) do
+      {:ok, normalized_text} ->
+        kind = payload |> Map.get("kind", "prompt") |> normalize_kind()
 
-    case Surface.submit_message(socket.assigns.session_id, text, kind: kind) do
-      {:ok, ack} ->
-        {:reply, {:ok, %{"request_id" => ack.request_id}}, socket}
+        case Surface.submit_message(socket.assigns.session_id, normalized_text, kind: kind) do
+          {:ok, ack} ->
+            {:reply, {:ok, %{"request_id" => ack.request_id}}, socket}
 
-      {:error, _reason} ->
-        {:reply,
-         {:error,
-          %{
-            "reason" => "session_unavailable",
-            "session_id" => socket.assigns.session_id
-          }}, socket}
+          {:error, _reason} ->
+            {:reply,
+             {:error,
+              %{
+                "reason" => "session_unavailable",
+                "session_id" => socket.assigns.session_id
+              }}, socket}
+        end
+
+      {:error, :missing_text_field} ->
+        {:reply, {:error, %{"reason" => "missing_text_field"}}, socket}
     end
   end
 
@@ -90,6 +96,15 @@ defmodule PrehenWeb.SessionChannel do
   defp normalize_kind("steer"), do: :steering
   defp normalize_kind("follow_up"), do: :follow_up
   defp normalize_kind(_), do: :prompt
+
+  defp normalize_submit_text(text) when is_binary(text) do
+    case String.trim(text) do
+      "" -> {:error, :missing_text_field}
+      _ -> {:ok, text}
+    end
+  end
+
+  defp normalize_submit_text(_), do: {:error, :missing_text_field}
 
   defp join_payload(session_id, session) do
     %{

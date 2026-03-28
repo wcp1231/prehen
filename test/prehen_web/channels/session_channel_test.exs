@@ -178,6 +178,28 @@ defmodule PrehenWeb.SessionChannelTest do
     assert_reply ref, :ok, %{"request_id" => _request_id}
   end
 
+  test "rejects malformed submit text with a structured error" do
+    socket =
+      socket(PrehenWeb.UserSocket, "user_1", %{})
+      |> Phoenix.Socket.assign(:session_id, "gw_malformed")
+
+    assert {:reply, {:error, %{"reason" => "missing_text_field"}}, returned_socket} =
+             PrehenWeb.SessionChannel.handle_in("submit", %{"text" => 123}, socket)
+
+    assert returned_socket.assigns.session_id == "gw_malformed"
+  end
+
+  test "rejects blank submit text with a structured error" do
+    socket =
+      socket(PrehenWeb.UserSocket, "user_1", %{})
+      |> Phoenix.Socket.assign(:session_id, "gw_blank")
+
+    assert {:reply, {:error, %{"reason" => "missing_text_field"}}, returned_socket} =
+             PrehenWeb.SessionChannel.handle_in("submit", %{"text" => "   "}, socket)
+
+    assert returned_socket.assigns.session_id == "gw_blank"
+  end
+
   test "returns submit failures with the unavailable session id" do
     socket =
       socket(PrehenWeb.UserSocket, "user_1", %{})
@@ -190,5 +212,29 @@ defmodule PrehenWeb.SessionChannelTest do
              PrehenWeb.SessionChannel.handle_in("submit", %{"text" => "hello"}, socket)
 
     assert returned_socket.assigns.session_id == "missing_session"
+  end
+
+  test "returns session unavailable for retained terminal sessions" do
+    :ok =
+      SessionRegistry.put(%{
+        gateway_session_id: "gw_terminal",
+        worker_pid: nil,
+        agent_name: "fake_stdio",
+        agent_session_id: "agent_gw_terminal",
+        status: :stopped
+      })
+
+    on_exit(fn -> SessionRegistry.delete("gw_terminal") end)
+
+    socket =
+      socket(PrehenWeb.UserSocket, "user_1", %{})
+      |> Phoenix.Socket.assign(:session_id, "gw_terminal")
+
+    assert {:reply,
+            {:error, %{"reason" => "session_unavailable", "session_id" => "gw_terminal"}},
+            returned_socket} =
+             PrehenWeb.SessionChannel.handle_in("submit", %{"text" => "hello"}, socket)
+
+    assert returned_socket.assigns.session_id == "gw_terminal"
   end
 end
