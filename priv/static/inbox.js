@@ -162,25 +162,30 @@
       const history = result[1].history;
 
       applySelectedSessionSnapshot(sessionId, detail, history);
-
-      if (state.selectedSessionId !== sessionId) {
-        return;
-      }
-
-      if (isTerminalStatus(detail && detail.status)) {
-        state.desiredChannelSessionId = null;
-        leaveActiveChannel();
-        setConnectionState("");
-        setComposerDisabled(true);
-        return;
-      }
-
-      await attachChannel(sessionId);
     } catch (error) {
       const handledError = new Error(extractErrorMessage(error));
       handledError.handled = true;
       handleSessionSelectionError(sessionId, handledError);
       throw handledError;
+    }
+
+    if (state.selectedSessionId !== sessionId) {
+      return;
+    }
+
+    if (isTerminalStatus(state.selectedLiveStatus)) {
+      state.desiredChannelSessionId = null;
+      leaveActiveChannel();
+      setConnectionState("");
+      setComposerDisabled(true);
+      return;
+    }
+
+    try {
+      await attachChannel(sessionId);
+    } catch (error) {
+      handleLiveAttachError(sessionId, error);
+      throw error;
     }
   }
 
@@ -1000,6 +1005,22 @@
     state.selectedHistory = [];
     renderSelectedSessionStatus("Unable to load session " + sessionId);
     renderEmptyHistory(extractErrorMessage(error));
+    setComposerDisabled(true);
+  }
+
+  function handleLiveAttachError(sessionId, error) {
+    if (sessionId !== state.selectedSessionId) {
+      return;
+    }
+
+    if (error && error.handled) {
+      return;
+    }
+
+    state.desiredChannelSessionId = null;
+    leaveActiveChannel();
+    setConnectionState("disconnected");
+    appendSystemNote(sessionId, extractErrorMessage(error));
     setComposerDisabled(true);
   }
 

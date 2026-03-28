@@ -28,7 +28,7 @@ defmodule PrehenWeb.InboxPageControllerTest do
     assert response(css_conn, 200) =~ ".inbox-shell"
   end
 
-  test "browser client source scopes submit ack UI and avoids fake join activity" do
+  test "browser client source keeps snapshot load failures separate from live attach failures" do
     source = File.read!(@inbox_js)
 
     assert source =~
@@ -56,6 +56,15 @@ defmodule PrehenWeb.InboxPageControllerTest do
     assert source =~ "Session is read-only."
     assert source =~
              ~r/applySelectedSessionSnapshot\(sessionId, detail, history\);(?s:.*?)if \(state\.selectedSessionId !== sessionId\) \{\s*return;\s*\}/
+
+    assert source =~
+             ~r/const detail = result\[0\]\.session;(?s:.*?)const history = result\[1\]\.history;(?s:.*?)applySelectedSessionSnapshot\(sessionId, detail, history\);(?s:.*?)await attachChannel\(sessionId\);\s*\}\s*catch \(error\) \{\s*handleLiveAttachError\(sessionId, error\);/
+
+    assert source =~
+             ~r/Promise\.all\(\[\s*fetchJson\(\"\/inbox\/sessions\/\" \+ encodeURIComponent\(sessionId\)\),\s*fetchJson\(\"\/inbox\/sessions\/\" \+ encodeURIComponent\(sessionId\) \+ \"\/history\"\)\s*\]\)(?s:.*?)catch \(error\) \{\s*const handledError = new Error\(extractErrorMessage\(error\)\);(?s:.*?)handleSessionSelectionError\(sessionId, handledError\);/
+
+    assert source =~
+             ~r/function handleLiveAttachError\(sessionId, error\) \{(?s:.*?)appendSystemNote\(sessionId, extractErrorMessage\(error\)\);/
 
     assert source =~
              ~r/if \(body\.status === "ok"\) \{(?s:.*?)state\.activeChannel\.joinRef === ref/
