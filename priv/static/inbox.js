@@ -7,6 +7,7 @@
     selectedSessionId: null,
     selectedSession: null,
     selectedHistory: [],
+    assistantPreviews: {},
     selectedLiveStatus: null,
     socket: null,
     socketOpen: false,
@@ -415,6 +416,7 @@
     state.selectedHistory.push({
       id: "system_" + Date.now(),
       kind: "system_note",
+      session_id: sessionId,
       text: text
     });
     renderHistory();
@@ -718,8 +720,13 @@
     };
 
     if (event.type === "session.output.delta") {
+      const messageId = event.payload && event.payload.message_id;
       patch.status = "running";
-      patch.preview = event.payload && event.payload.text;
+      patch.preview = updateAssistantPreview(
+        event.gateway_session_id,
+        messageId,
+        event.payload && event.payload.text
+      );
       patch.last_event_at = Date.now();
     }
 
@@ -760,6 +767,8 @@
         text: text || ""
       });
     }
+
+    updateAssistantPreview(sessionId, messageId, text);
   }
 
   function appendUserMessage(sessionId, requestId, text) {
@@ -861,17 +870,59 @@
     }
 
     const systemNotes = state.selectedHistory.filter(function (entry) {
-      return entry.kind === "system_note";
+      return entry.kind === "system_note" && entry.session_id === sessionId;
     });
+    const sessionHistory = Array.isArray(history) ? history.slice() : [];
 
     state.selectedSession = detail;
-    state.selectedHistory = (Array.isArray(history) ? history.slice() : []).concat(systemNotes);
+    state.selectedHistory = sessionHistory.concat(systemNotes);
     state.selectedLiveStatus = detail && detail.status;
+    hydrateAssistantPreview(sessionId, sessionHistory, detail);
 
     upsertSessionRow(detail);
     renderSessionList();
     renderHistory();
     renderSelectedSessionStatus(formatSessionStatus(detail));
+  }
+
+  function hydrateAssistantPreview(sessionId, history, detail) {
+    const previews = {};
+    let latestPreview = detail && detail.preview ? detail.preview : null;
+
+    history.forEach(function (entry) {
+      if (entry.kind !== "assistant_message") {
+        return;
+      }
+
+      if (entry.message_id) {
+        previews[entry.message_id] = entry.text || "";
+      }
+
+      latestPreview = entry.text || latestPreview;
+    });
+
+    state.assistantPreviews[sessionId] = previews;
+
+    if (latestPreview) {
+      upsertSessionRow({
+        session_id: sessionId,
+        preview: latestPreview
+      });
+    }
+  }
+
+  function updateAssistantPreview(sessionId, messageId, text) {
+    if (!state.assistantPreviews[sessionId]) {
+      state.assistantPreviews[sessionId] = {};
+    }
+
+    if (!messageId) {
+      return text || null;
+    }
+
+    const mergedText = (state.assistantPreviews[sessionId][messageId] || "") + (text || "");
+    state.assistantPreviews[sessionId][messageId] = mergedText;
+    return mergedText;
   }
 
   function formatSessionTimestamp(timestamp) {

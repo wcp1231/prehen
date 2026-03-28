@@ -4,6 +4,7 @@ defmodule PrehenWeb.InboxPageControllerTest do
   import Phoenix.ConnTest
 
   @endpoint PrehenWeb.Endpoint
+  @inbox_js Path.expand("../../..", __DIR__) |> Path.join("priv/static/inbox.js")
 
   test "serves the inbox HTML shell with the browser hooks" do
     conn = get(build_conn(), "/inbox")
@@ -19,13 +20,16 @@ defmodule PrehenWeb.InboxPageControllerTest do
     assert body =~ ~s(<script src="/inbox.js")
   end
 
-  test "browser client source includes retained-session and composer guard logic" do
-    source = File.read!("/Users/wenchunpeng/Hack/elixir/prehen/priv/static/inbox.js")
+  test "browser client source scopes system notes and merges assistant preview text" do
+    source = File.read!(@inbox_js)
 
     assert source =~
              ~r/function handleSubmitError\(sessionId, response\) \{(?s:.*?)appendSystemNote\(sessionId, .*?\);(?s:.*?)setComposerDisabled\(true\);/
 
     assert source =~ "resolveJoinFailureFromHttp"
     assert source =~ "formatSessionTimestamp"
+    assert source =~ ~r/function appendSystemNote\(sessionId, text\) \{(?s:.*?)session_id: sessionId/
+    assert source =~ "entry.session_id === sessionId"
+    assert source =~ "function updateAssistantPreview(sessionId, messageId, text)"
   end
 end
