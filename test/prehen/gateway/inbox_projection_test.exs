@@ -132,6 +132,61 @@ defmodule Prehen.Gateway.InboxProjectionTest do
     assert row.last_event_at == timestamp
   end
 
+  test "merges assistant deltas by message_id even when later entries exist" do
+    assert :ok =
+             InboxProjection.session_started(%{
+               session_id: "gw_interleaved",
+               agent_name: "fake_stdio",
+               created_at: 1_774_625_000_000
+             })
+
+    assert :ok =
+             InboxProjection.agent_delta(%{
+               session_id: "gw_interleaved",
+               message_id: "assistant_1",
+               text: "he"
+             })
+
+    assert :ok =
+             InboxProjection.user_message(%{
+               session_id: "gw_interleaved",
+               message_id: "request_2",
+               text: "follow up"
+             })
+
+    assert {:ok, row_after_user} = InboxProjection.fetch_session("gw_interleaved")
+    assert row_after_user.preview == "follow up"
+    user_last_event_at = row_after_user.last_event_at
+
+    assert :ok =
+             InboxProjection.agent_delta(%{
+               session_id: "gw_interleaved",
+               message_id: "assistant_1",
+               text: "llo"
+             })
+
+    assert {:ok, history} = InboxProjection.fetch_history("gw_interleaved")
+
+    assert [
+             %{
+               kind: :user_message,
+               session_id: "gw_interleaved",
+               message_id: "request_2",
+               text: "follow up"
+             },
+             %{
+               kind: :assistant_message,
+               session_id: "gw_interleaved",
+               message_id: "assistant_1",
+               text: "hello"
+             }
+           ] = Enum.map(history, &Map.take(&1, [:kind, :session_id, :message_id, :text]))
+
+    assert {:ok, row} = InboxProjection.fetch_session("gw_interleaved")
+    assert row.preview == "hello"
+    assert row.last_event_at > user_last_event_at
+  end
+
   test "duplicate session_started is a no-op that preserves row and history" do
     assert :ok =
              InboxProjection.session_started(%{
@@ -229,6 +284,51 @@ defmodule Prehen.Gateway.InboxProjectionTest do
 
     assert {:ok, row} = InboxProjection.fetch_session("gw_retained")
     assert {:ok, history} = InboxProjection.fetch_history("gw_retained")
+
+    assert row == original_row
+    assert history == original_history
+  end
+
+  test "malformed optional fields return invalid_attrs and preserve retained state" do
+    assert :ok =
+             InboxProjection.session_started(%{
+               session_id: "gw_optional",
+               agent_name: "fake_stdio",
+               created_at: 1_774_625_000_000
+             })
+
+    assert :ok =
+             InboxProjection.user_message(%{
+               session_id: "gw_optional",
+               message_id: "request_optional",
+               text: "hello"
+             })
+
+    assert {:ok, original_row} = InboxProjection.fetch_session("gw_optional")
+    assert {:ok, original_history} = InboxProjection.fetch_history("gw_optional")
+
+    assert {:error, :invalid_attrs} =
+             InboxProjection.session_started(%{
+               session_id: "gw_optional_2",
+               created_at: "not-an-integer"
+             })
+
+    assert {:error, :invalid_attrs} =
+             InboxProjection.user_message(%{
+               session_id: "gw_optional",
+               message_id: "request_optional_2",
+               text: 123
+             })
+
+    assert {:error, :invalid_attrs} =
+             InboxProjection.agent_delta(%{
+               session_id: "gw_optional",
+               message_id: "assistant_optional",
+               text: 123
+             })
+
+    assert {:ok, row} = InboxProjection.fetch_session("gw_optional")
+    assert {:ok, history} = InboxProjection.fetch_history("gw_optional")
 
     assert row == original_row
     assert history == original_history

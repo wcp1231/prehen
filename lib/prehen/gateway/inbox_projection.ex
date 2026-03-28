@@ -63,7 +63,8 @@ defmodule Prehen.Gateway.InboxProjection do
   end
 
   def handle_call({:session_started, attrs}, _from, state) do
-    with {:ok, session_id} <- fetch_required_binary(attrs, :session_id) do
+    with {:ok, session_id} <- fetch_required_binary(attrs, :session_id),
+         :ok <- validate_optional_integer(attrs, :created_at) do
       case Map.has_key?(state.sessions, session_id) do
         true ->
           {:reply, :ok, state}
@@ -89,12 +90,14 @@ defmodule Prehen.Gateway.InboxProjection do
       end
     else
       :error -> {:reply, {:error, :invalid_attrs}, state}
+      {:error, :invalid_attrs} -> {:reply, {:error, :invalid_attrs}, state}
     end
   end
 
   def handle_call({:user_message, attrs}, _from, state) do
     with {:ok, session_id} <- fetch_required_binary(attrs, :session_id),
-         {:ok, message_id} <- fetch_required_binary(attrs, :message_id) do
+         {:ok, message_id} <- fetch_required_binary(attrs, :message_id),
+         {:ok, text} <- fetch_optional_text(attrs) do
       case Map.has_key?(state.sessions, session_id) do
         false ->
           {:reply, {:error, :not_found}, state}
@@ -107,7 +110,7 @@ defmodule Prehen.Gateway.InboxProjection do
             kind: :user_message,
             session_id: session_id,
             message_id: message_id,
-            text: Map.get(attrs, :text, ""),
+            text: text,
             timestamp: timestamp
           }
 
@@ -121,18 +124,19 @@ defmodule Prehen.Gateway.InboxProjection do
       end
     else
       :error -> {:reply, {:error, :invalid_attrs}, state}
+      {:error, :invalid_attrs} -> {:reply, {:error, :invalid_attrs}, state}
     end
   end
 
   def handle_call({:agent_delta, attrs}, _from, state) do
     with {:ok, session_id} <- fetch_required_binary(attrs, :session_id),
-         {:ok, message_id} <- fetch_required_binary(attrs, :message_id) do
+         {:ok, message_id} <- fetch_required_binary(attrs, :message_id),
+         {:ok, text} <- fetch_optional_text(attrs) do
       case Map.has_key?(state.sessions, session_id) do
         false ->
           {:reply, {:error, :not_found}, state}
 
         true ->
-          text = Map.get(attrs, :text, "")
           {timestamp, next_state} = next_timestamp(state, session_id)
 
           next_state =
@@ -145,6 +149,7 @@ defmodule Prehen.Gateway.InboxProjection do
       end
     else
       :error -> {:reply, {:error, :invalid_attrs}, state}
+      {:error, :invalid_attrs} -> {:reply, {:error, :invalid_attrs}, state}
     end
   end
 
@@ -186,11 +191,8 @@ defmodule Prehen.Gateway.InboxProjection do
 
   defp merge_assistant_delta(state, session_id, message_id, text, timestamp) do
     update_in(state.history[session_id], fn history ->
-      case Enum.split(history, -1) do
-        {prefix, [%{kind: :assistant_message, message_id: ^message_id} = last]} ->
-          prefix ++ [%{last | text: last.text <> text, timestamp: timestamp}]
-
-        _ ->
+      case Enum.find_index(history, &assistant_message_match?(&1, message_id)) do
+        nil ->
           history ++
             [
               %{
@@ -202,6 +204,10 @@ defmodule Prehen.Gateway.InboxProjection do
                 timestamp: timestamp
               }
             ]
+
+        index ->
+          {before, [entry | trailing]} = Enum.split(history, index)
+          before ++ trailing ++ [%{entry | text: entry.text <> text, timestamp: timestamp}]
       end
     end)
   end
@@ -230,6 +236,15 @@ defmodule Prehen.Gateway.InboxProjection do
     |> then(&("history_" <> &1))
   end
 
+  defp assistant_message_match?(
+         %{kind: :assistant_message, message_id: message_id},
+         target_message_id
+       ) do
+    message_id == target_message_id
+  end
+
+  defp assistant_message_match?(_entry, _target_message_id), do: false
+
   defp fetch_required_binary(attrs, key) when is_map(attrs) do
     case Map.fetch(attrs, key) do
       {:ok, value} when is_binary(value) -> {:ok, value}
@@ -238,4 +253,23 @@ defmodule Prehen.Gateway.InboxProjection do
   end
 
   defp fetch_required_binary(_attrs, _key), do: :error
+
+  defp fetch_optional_text(attrs) when is_map(attrs) do
+    case Map.get(attrs, :text, "") do
+      value when is_binary(value) -> {:ok, value}
+      _ -> {:error, :invalid_attrs}
+    end
+  end
+
+  defp fetch_optional_text(_attrs), do: {:error, :invalid_attrs}
+
+  defp validate_optional_integer(attrs, key) when is_map(attrs) do
+    case Map.fetch(attrs, key) do
+      :error -> :ok
+      {:ok, value} when is_integer(value) -> :ok
+      _ -> {:error, :invalid_attrs}
+    end
+  end
+
+  defp validate_optional_integer(_attrs, _key), do: {:error, :invalid_attrs}
 end
