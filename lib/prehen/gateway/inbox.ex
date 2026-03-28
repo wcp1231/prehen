@@ -18,13 +18,23 @@ defmodule Prehen.Gateway.Inbox do
         :ok
 
       {:ok, _session} ->
-        case Surface.stop_session(session_id) do
-          :ok -> :ok
-          {:error, error} -> {:error, error}
-        end
+        stop_live_session(session_id)
 
       {:error, :not_found} ->
+        stop_live_session(session_id)
+    end
+  end
+
+  defp stop_live_session(session_id) do
+    case Surface.stop_session(session_id) do
+      :ok ->
+        :ok
+
+      {:error, %{type: :session_stop_failed, reason: :not_found}} ->
         {:error, %{type: :session_stop_failed, reason: :not_found}}
+
+      {:error, error} ->
+        {:error, error}
     end
   end
 end

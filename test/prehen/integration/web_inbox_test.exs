@@ -35,6 +35,21 @@ defmodule Prehen.Integration.WebInboxTest do
     assert [%{"agent" => "fake_stdio", "name" => "fake_stdio", "default" => true}] = agents
   end
 
+  test "default agent flag follows registry order rather than sorted response order" do
+    zebra = fake_profile("zebra_stdio")
+    alpha = fake_profile("alpha_stdio")
+    set_registry([zebra, alpha])
+
+    conn = get(build_conn(), "/agents")
+
+    assert %{"agents" => agents} = json_response(conn, 200)
+
+    assert [
+             %{"agent" => "alpha_stdio", "default" => false},
+             %{"agent" => "zebra_stdio", "default" => true}
+           ] = Enum.map(agents, &Map.take(&1, ["agent", "default"]))
+  end
+
   test "returns an empty agent list when no agents are configured" do
     set_registry([])
 
@@ -48,6 +63,8 @@ defmodule Prehen.Integration.WebInboxTest do
 
     assert %{"session_id" => session_id, "agent" => "fake_stdio", "status" => "attached"} =
              json_response(conn, 201)
+
+    on_exit(fn -> cleanup_session(session_id) end)
 
     conn = post(build_conn(), "/sessions/#{session_id}/messages", %{"text" => "hello inbox"})
 
@@ -105,13 +122,17 @@ defmodule Prehen.Integration.WebInboxTest do
   test "creates an inbox session with the default agent when agent is omitted" do
     conn = post(build_conn(), "/inbox/sessions", %{})
 
-    assert %{"session_id" => _session_id, "agent" => "fake_stdio", "status" => "attached"} =
+    assert %{"session_id" => session_id, "agent" => "fake_stdio", "status" => "attached"} =
              json_response(conn, 201)
+
+    on_exit(fn -> cleanup_session(session_id) end)
   end
 
   test "stopping a retained inbox session is idempotent" do
     conn = post(build_conn(), "/inbox/sessions", %{"agent" => "fake_stdio"})
     assert %{"session_id" => session_id, "status" => "attached"} = json_response(conn, 201)
+
+    on_exit(fn -> cleanup_session(session_id) end)
 
     conn = delete(build_conn(), "/inbox/sessions/#{session_id}")
     assert response(conn, 204) == ""
@@ -125,9 +146,23 @@ defmodule Prehen.Integration.WebInboxTest do
              json_response(conn, 200)
   end
 
-  defp fake_profile do
+  test "stops a live inbox session even when projection state is missing" do
+    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "fake_stdio"})
+    assert %{"session_id" => session_id, "status" => "attached"} = json_response(conn, 201)
+
+    on_exit(fn -> cleanup_session(session_id) end)
+
+    InboxProjection.reset()
+
+    conn = delete(build_conn(), "/inbox/sessions/#{session_id}")
+    assert response(conn, 204) == ""
+
+    assert {:error, :not_found} = InboxProjection.fetch_session(session_id)
+  end
+
+  defp fake_profile(name \\ "fake_stdio") do
     %Profile{
-      name: "fake_stdio",
+      name: name,
       command: ["mix", "run", "--no-start", "test/support/fake_stdio_agent.exs"]
     }
   end
@@ -157,4 +192,9 @@ defmodule Prehen.Integration.WebInboxTest do
   end
 
   defp wait_until(_fun, 0), do: {:error, :timeout}
+
+  defp cleanup_session(session_id) do
+    _ = Prehen.Client.Surface.stop_session(session_id)
+    :ok
+  end
 end
