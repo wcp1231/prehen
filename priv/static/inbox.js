@@ -163,6 +163,10 @@
 
       applySelectedSessionSnapshot(sessionId, detail, history);
 
+      if (state.selectedSessionId !== sessionId) {
+        return;
+      }
+
       if (isTerminalStatus(detail && detail.status)) {
         state.desiredChannelSessionId = null;
         leaveActiveChannel();
@@ -592,6 +596,7 @@
         topic === state.activeChannel.topic &&
         joinRef === state.activeChannel.joinRef
       ) {
+        rejectPendingRepliesForSession(state.activeChannel.sessionId, "Channel closed");
         state.activeChannel.joined = false;
         setConnectionState("disconnected");
         setComposerDisabled(true);
@@ -718,6 +723,17 @@
       pending.reject(new Error(message));
     });
     state.pendingReplies.clear();
+  }
+
+  function rejectPendingRepliesForSession(sessionId, message) {
+    state.pendingReplies.forEach(function (pending, ref) {
+      if (pending.sessionId !== sessionId) {
+        return;
+      }
+
+      pending.reject(new Error(message));
+      state.pendingReplies.delete(ref);
+    });
   }
 
   function leaveActiveChannel() {

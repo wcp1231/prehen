@@ -55,9 +55,14 @@ defmodule PrehenWeb.InboxPageControllerTest do
     assert source =~ "friendlySubmitErrorMessage(response)"
     assert source =~ "Session is read-only."
     assert source =~
+             ~r/applySelectedSessionSnapshot\(sessionId, detail, history\);(?s:.*?)if \(state\.selectedSessionId !== sessionId\) \{\s*return;\s*\}/
+
+    assert source =~
              ~r/if \(body\.status === "ok"\) \{(?s:.*?)state\.activeChannel\.joinRef === ref/
 
     assert source =~ ~r/const sessionId = state\.selectedSessionId;(?s:.*?)submitMessage\(sessionId, text\)\.catch/
     assert source =~ ~r/appendSystemNote\(sessionId, extractErrorMessage\(error\)\);/
+    assert source =~ "rejectPendingRepliesForSession(state.activeChannel.sessionId, \"Channel closed\")"
+    assert source =~ ~r/function rejectPendingRepliesForSession\(sessionId, message\) \{/
   end
 end
