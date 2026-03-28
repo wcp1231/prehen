@@ -126,7 +126,7 @@ The inbox UI, inbox JSON endpoints, session registry, and retained history all o
 
 ### 3.2 Message Submission
 
-1. Client submits a message through HTTP, `/inbox/sessions/:id/messages`, SessionChannel, or `Prehen.submit_message/3`.
+1. Client submits a message through HTTP `POST /sessions/:id/messages`, SessionChannel, or `Prehen.submit_message/3`.
 2. `Surface.submit_message/3` looks up the worker by `gateway_session_id`.
 3. The worker forwards a `session.message` frame to the agent process.
 4. The agent returns `session.output.delta` or other session events.

@@ -174,7 +174,11 @@ defmodule Prehen.Integration.WebInboxTest do
 
     conn = get(build_conn(), "/inbox/sessions/#{session_id}/history")
     assert %{"history" => history} = json_response(conn, 200)
-    assert history != []
+
+    assert [
+             %{"kind" => "user_message", "message_id" => ^request_id, "text" => "hello"},
+             %{"kind" => "assistant_message", "message_id" => ^request_id, "text" => "hi"}
+           ] = history
   end
 
   test "stops a live inbox session even when projection state is missing" do
