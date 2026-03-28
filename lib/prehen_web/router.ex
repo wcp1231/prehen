@@ -3,8 +3,18 @@ defmodule PrehenWeb.Router do
 
   import Phoenix.Controller
 
+  pipeline :browser do
+    plug(:accepts, ["html"])
+  end
+
   pipeline :api do
     plug(:accepts, ["json"])
+  end
+
+  scope "/", PrehenWeb do
+    pipe_through(:browser)
+
+    get("/inbox", InboxPageController, :show)
   end
 
   scope "/", PrehenWeb do
