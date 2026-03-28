@@ -1,6 +1,7 @@
 defmodule Prehen.Integration.WebInboxTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
   alias Prehen.Agents.Profile
   alias Prehen.Agents.Registry
   alias Prehen.Gateway.InboxProjection
@@ -154,10 +155,22 @@ defmodule Prehen.Integration.WebInboxTest do
 
     InboxProjection.reset()
 
-    conn = delete(build_conn(), "/inbox/sessions/#{session_id}")
-    assert response(conn, 204) == ""
+    log =
+      capture_log(fn ->
+        conn = delete(build_conn(), "/inbox/sessions/#{session_id}")
+        assert response(conn, 204) == ""
 
-    assert {:error, :not_found} = InboxProjection.fetch_session(session_id)
+        assert {:ok, %{session_id: ^session_id, status: :stopped}} =
+                 wait_until(fn ->
+                   case InboxProjection.fetch_session(session_id) do
+                     {:ok, %{status: :stopped} = row} -> {:ok, row}
+                     _ -> :retry
+                   end
+                 end)
+      end)
+
+    refute log =~ "MatchError"
+    refute log =~ "lib/prehen/gateway/session_worker.ex:186"
   end
 
   defp fake_profile(name \\ "fake_stdio") do

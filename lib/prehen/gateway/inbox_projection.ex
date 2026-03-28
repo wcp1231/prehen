@@ -182,7 +182,23 @@ defmodule Prehen.Gateway.InboxProjection do
          {:ok, status} <- fetch_terminal_status(attrs) do
       case Map.has_key?(state.sessions, session_id) do
         false ->
-          {:reply, {:error, :not_found}, state}
+          now_ms = System.system_time(:millisecond)
+
+          row = %{
+            session_id: session_id,
+            agent_name: Map.get(attrs, :agent_name),
+            status: status,
+            created_at: nil,
+            last_event_at: now_ms,
+            preview: nil
+          }
+
+          next_state =
+            state
+            |> put_session(row)
+            |> ensure_history(session_id)
+
+          {:reply, :ok, next_state}
 
         true ->
           next_state = update_session_status(state, session_id, status)
@@ -255,7 +271,9 @@ defmodule Prehen.Gateway.InboxProjection do
 
   defp update_session_row(state, session_id, entry, opts \\ []) do
     update_in(state.sessions[session_id], fn
-      nil -> nil
+      nil ->
+        nil
+
       row ->
         row
         |> Map.put(:preview, entry.text)
