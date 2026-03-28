@@ -100,6 +100,22 @@ Recommended fields:
 
 Multiple profiles may point at the same implementation.
 
+Phase 1 required fields:
+
+- `name`
+- `label`
+- `implementation`
+- `default_provider`
+- `default_model`
+- `prompt_profile`
+- `workspace_policy`
+
+Deferred or productization-oriented fields:
+
+- `description`
+- `capability_set`
+- `session_defaults`
+
 Examples:
 
 - `coder`
@@ -126,6 +142,22 @@ Recommended fields:
 - `memory_mode`
 
 The implementation layer should remain hidden from normal user choice.
+
+Phase 1 required fields:
+
+- `name`
+- `command`
+- `args`
+- `env`
+- `wrapper`
+
+Deferred or refinement-oriented fields:
+
+- `launch_mode`
+- `provider_bridge_mode`
+- `prompt_bridge_mode`
+- `workspace_bridge_mode`
+- `memory_mode`
 
 ### 5.3 Wrapper
 
@@ -200,6 +232,12 @@ Required outbound events:
 - `session.closed`
 
 This contract is internal to Prehen integration work. It is not the user-facing product surface.
+
+Terminology rules:
+
+- UI or client `submit` maps to wrapper contract `session.message`
+- UI or client `stop` or `cancel` maps to wrapper contract `session.control`
+- implementation planning should treat `submit`, `stop`, and `cancel` as product-surface actions, not as separate wrapper event types
 
 ## 9. Control-Plane Ownership
 
@@ -301,6 +339,12 @@ The wrapper or implementation should be evaluated internally for:
 
 If an implementation cannot satisfy the internal support contract, it should not be registered as a supported user-facing profile.
 
+Acceptance matrix for the first validation cycle:
+
+- turn completion is acceptable when the wrapper can detect a stable end-of-turn signal from the target implementation often enough that Gateway session status does not remain stuck in `running` after a normal answer
+- stop or cancel is acceptable when Prehen can terminate an active turn or session without leaving an orphaned live process in the normal success path
+- stream handling is acceptable when either incremental output can be surfaced reliably or the implementation is explicitly classified as `final_only` for planning purposes
+
 ## 11. Failure Categories
 
 Integration failures should be classified clearly.
@@ -393,6 +437,12 @@ The first two phases should be considered successful if all of the following are
 - the agent executable does not need source modification for the integration attempt
 
 Advanced Prehen-managed capabilities do not need to be complete for the first success milestone, but the architecture must leave room for them.
+
+For milestone planning, `reliable enough` should mean:
+
+- normal request and response turns do not leave the session in a permanently ambiguous state
+- a stop or cancel request can be mapped to either a native cancel path or a wrapper-owned process termination path with predictable session closure semantics
+- the wrapper can classify any remaining limitations explicitly enough that Prehen can decide whether to expose or reject the implementation
 
 ## 16. Planning Boundaries
 
