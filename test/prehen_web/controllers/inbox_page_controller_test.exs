@@ -58,13 +58,16 @@ defmodule PrehenWeb.InboxPageControllerTest do
              ~r/applySelectedSessionSnapshot\(sessionId, detail, history\);(?s:.*?)if \(state\.selectedSessionId !== sessionId\) \{\s*return;\s*\}/
 
     assert source =~
-             ~r/const detail = result\[0\]\.session;(?s:.*?)const history = result\[1\]\.history;(?s:.*?)applySelectedSessionSnapshot\(sessionId, detail, history\);(?s:.*?)await attachChannel\(sessionId\);\s*\}\s*catch \(error\) \{\s*handleLiveAttachError\(sessionId, error\);/
+             ~r/const detail = result\[0\]\.session;(?s:.*?)const history = result\[1\]\.history;(?s:.*?)applySelectedSessionSnapshot\(sessionId, detail, history\);(?s:.*?)try \{\s*await attachChannel\(sessionId\);/
+
+    assert source =~
+             ~r/try \{\s*await attachChannel\(sessionId\);\s*\} catch \(error\) \{\s*const handledError = handleLiveAttachError\(sessionId, error\);(?s:.*?)if \(handledError && handledError\.handled\) \{\s*return;\s*\}/
 
     assert source =~
              ~r/Promise\.all\(\[\s*fetchJson\(\"\/inbox\/sessions\/\" \+ encodeURIComponent\(sessionId\)\),\s*fetchJson\(\"\/inbox\/sessions\/\" \+ encodeURIComponent\(sessionId\) \+ \"\/history\"\)\s*\]\)(?s:.*?)catch \(error\) \{\s*const handledError = new Error\(extractErrorMessage\(error\)\);(?s:.*?)handleSessionSelectionError\(sessionId, handledError\);/
 
     assert source =~
-             ~r/function handleLiveAttachError\(sessionId, error\) \{(?s:.*?)appendSystemNote\(sessionId, extractErrorMessage\(error\)\);/
+             ~r/function handleLiveAttachError\(sessionId, error\) \{(?s:.*?)const handledError = error instanceof Error \? error : new Error\(extractErrorMessage\(error\)\);(?s:.*?)handledError\.handled = true;(?s:.*?)appendSystemNote\(sessionId, extractErrorMessage\(handledError\)\);(?s:.*?)return handledError;/
 
     assert source =~
              ~r/if \(body\.status === "ok"\) \{(?s:.*?)state\.activeChannel\.joinRef === ref/

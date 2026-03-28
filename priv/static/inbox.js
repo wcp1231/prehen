@@ -184,8 +184,13 @@
     try {
       await attachChannel(sessionId);
     } catch (error) {
-      handleLiveAttachError(sessionId, error);
-      throw error;
+      const handledError = handleLiveAttachError(sessionId, error);
+
+      if (handledError && handledError.handled) {
+        return;
+      }
+
+      throw handledError || error;
     }
   }
 
@@ -1009,19 +1014,24 @@
   }
 
   function handleLiveAttachError(sessionId, error) {
+    const handledError = error instanceof Error ? error : new Error(extractErrorMessage(error));
+
+    handledError.handled = true;
+
     if (sessionId !== state.selectedSessionId) {
-      return;
+      return handledError;
     }
 
     if (error && error.handled) {
-      return;
+      return handledError;
     }
 
     state.desiredChannelSessionId = null;
     leaveActiveChannel();
     setConnectionState("disconnected");
-    appendSystemNote(sessionId, extractErrorMessage(error));
+    appendSystemNote(sessionId, extractErrorMessage(handledError));
     setComposerDisabled(true);
+    return handledError;
   }
 
   function hydrateAssistantPreview(sessionId, history, detail) {
