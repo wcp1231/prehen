@@ -85,7 +85,7 @@ The inbox UI, inbox JSON endpoints, session registry, and retained history all o
 - stores route state only
 - tracks `gateway_session_id`, worker pid, agent name, agent session id, and attach status
 - does not own canonical session truth
-- retains terminal inbox rows in memory so stopped sessions remain visible until node restart
+- keeps terminal route metadata available for status and idempotent stop handling
 
 ### 2.6 `Prehen.Observability.TraceCollector`
 
@@ -98,6 +98,7 @@ The inbox UI, inbox JSON endpoints, session registry, and retained history all o
 - keeps inbox session summaries and message history for the browser surface
 - is rebuilt from live events only during the current node lifetime
 - keeps stopped sessions readable after stop, but only until restart
+
 ### 2.8 `Prehen.Agents.Transports.Stdio`
 
 - concrete `stdio + JSON Lines` transport
@@ -151,7 +152,7 @@ The inbox UI, inbox JSON endpoints, session registry, and retained history all o
 
 1. Client stops a session through HTTP, `/inbox/sessions/:id`, or `Prehen.stop_session/1`.
 2. The gateway stops the attached worker or treats an already-terminal route as an idempotent stop.
-3. `SessionRegistry` and `InboxProjection` retain a terminal row with status like `stopped` for the rest of the node lifetime.
+3. `SessionRegistry` retains terminal route metadata, and `InboxProjection` retains the inbox row and history for the rest of the node lifetime.
 4. `/inbox` can still render session detail and retained history after stop.
 5. A node restart clears those retained rows and history.
 
