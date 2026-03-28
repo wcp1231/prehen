@@ -132,7 +132,8 @@ defmodule Prehen.Gateway.SessionWorker do
 
         {:reply, :ok, state}
 
-      {:error, reason} -> {:reply, {:error, reason}, state}
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -186,6 +187,7 @@ defmodule Prehen.Gateway.SessionWorker do
     :ok =
       InboxProjection.session_stopped(%{
         session_id: state.gateway_session_id,
+        agent_name: state.agent_name,
         status: terminal_status
       })
 
@@ -247,7 +249,8 @@ defmodule Prehen.Gateway.SessionWorker do
 
   defp safe_stop_transport(_transport_module, _transport), do: :ok
 
-  defp project_transport_frame(session_id, "session.output.delta", payload) when is_map(payload) do
+  defp project_transport_frame(session_id, "session.output.delta", payload)
+       when is_map(payload) do
     with {:ok, message_id} <- fetch_optional_binary(payload, "message_id"),
          {:ok, text} <- fetch_optional_binary(payload, "text") do
       InboxProjection.agent_delta(%{
@@ -260,7 +263,8 @@ defmodule Prehen.Gateway.SessionWorker do
     end
   end
 
-  defp project_transport_frame(session_id, "session.output.completed", payload) when is_map(payload) do
+  defp project_transport_frame(session_id, "session.output.completed", payload)
+       when is_map(payload) do
     with {:ok, message_id} <- fetch_optional_binary(payload, "message_id") do
       :ok =
         SessionRegistry.put(%{

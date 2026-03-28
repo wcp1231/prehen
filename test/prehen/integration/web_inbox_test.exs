@@ -160,10 +160,10 @@ defmodule Prehen.Integration.WebInboxTest do
         conn = delete(build_conn(), "/inbox/sessions/#{session_id}")
         assert response(conn, 204) == ""
 
-        assert {:ok, %{session_id: ^session_id, status: :stopped}} =
+        assert {:ok, %{session_id: ^session_id, status: :stopped, agent_name: "fake_stdio"}} =
                  wait_until(fn ->
                    case InboxProjection.fetch_session(session_id) do
-                     {:ok, %{status: :stopped} = row} -> {:ok, row}
+                     {:ok, %{status: :stopped, agent_name: "fake_stdio"} = row} -> {:ok, row}
                      _ -> :retry
                    end
                  end)
@@ -171,6 +171,37 @@ defmodule Prehen.Integration.WebInboxTest do
 
     refute log =~ "MatchError"
     refute log =~ "lib/prehen/gateway/session_worker.ex:186"
+  end
+
+  test "recreates retained row on idempotent delete when registry is already terminal and projection is missing" do
+    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "fake_stdio"})
+    assert %{"session_id" => session_id, "status" => "attached"} = json_response(conn, 201)
+
+    on_exit(fn -> cleanup_session(session_id) end)
+
+    conn = delete(build_conn(), "/inbox/sessions/#{session_id}")
+    assert response(conn, 204) == ""
+
+    assert {:ok, %{session_id: ^session_id, status: :stopped, agent_name: "fake_stdio"}} =
+             wait_until(fn ->
+               case InboxProjection.fetch_session(session_id) do
+                 {:ok, %{status: :stopped, agent_name: "fake_stdio"} = row} -> {:ok, row}
+                 _ -> :retry
+               end
+             end)
+
+    InboxProjection.reset()
+
+    conn = delete(build_conn(), "/inbox/sessions/#{session_id}")
+    assert response(conn, 204) == ""
+
+    assert {:ok, %{session_id: ^session_id, status: :stopped, agent_name: "fake_stdio"}} =
+             wait_until(fn ->
+               case InboxProjection.fetch_session(session_id) do
+                 {:ok, %{status: :stopped, agent_name: "fake_stdio"} = row} -> {:ok, row}
+                 _ -> :retry
+               end
+             end)
   end
 
   defp fake_profile(name \\ "fake_stdio") do
