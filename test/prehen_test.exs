@@ -49,6 +49,7 @@ defmodule PrehenTest do
     assert status.status == :running
     assert status.agent_name == "fake_stdio"
     assert is_binary(status.agent_session_id)
+    refute Map.has_key?(status, :worker_pid)
 
     assert :ok = Prehen.stop_session(session_id)
 
@@ -57,6 +58,7 @@ defmodule PrehenTest do
     assert stopped_status.status == :stopped
     assert stopped_status.agent_name == "fake_stdio"
     assert is_binary(stopped_status.agent_session_id)
+    refute Map.has_key?(stopped_status, :worker_pid)
   end
 
   test "run/2 reports a gateway error for a missing reused session" do

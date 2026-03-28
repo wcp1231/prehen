@@ -80,7 +80,10 @@ defmodule Prehen.Client.Surface do
       {:ok, status} ->
         sanitized =
           status
-          |> Enum.reject(fn {_key, value} -> is_pid(value) end)
+          |> Enum.reject(fn
+            {:worker_pid, _value} -> true
+            {_key, value} -> is_pid(value)
+          end)
           |> Map.new()
           |> Map.put(:session_id, session_id)
 

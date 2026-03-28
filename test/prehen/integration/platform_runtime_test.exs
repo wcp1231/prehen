@@ -68,6 +68,20 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
     refute Map.has_key?(session, "worker_pid")
   end
 
+  test "GET /sessions/:id omits worker_pid after retained terminal stop" do
+    conn = post(build_conn(), "/sessions", %{"agent" => "fake_stdio"})
+    assert %{"session_id" => session_id} = json_response(conn, 201)
+
+    assert :ok = Surface.stop_session(session_id)
+
+    conn = get(build_conn(), "/sessions/#{session_id}")
+    assert %{"session" => session} = json_response(conn, 200)
+
+    assert session["session_id"] == session_id
+    assert session["status"] == "stopped"
+    refute Map.has_key?(session, "worker_pid")
+  end
+
   test "POST /sessions/:id/messages returns 400 when message text is missing" do
     conn = post(build_conn(), "/sessions", %{"agent" => "fake_stdio"})
     assert %{"session_id" => session_id} = json_response(conn, 201)
