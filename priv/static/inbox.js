@@ -248,10 +248,14 @@
       sessionId: sessionId
     });
 
-    dom.composerInput.value = "";
+    const isStillSelected = state.selectedSessionId === sessionId;
+
+    if (isStillSelected) {
+      dom.composerInput.value = "";
+    }
+
     appendUserMessage(sessionId, reply.request_id, text);
-    state.selectedLiveStatus = "running";
-    updateSelectedStatus("running");
+    updateSelectedStatus("running", { sessionId: sessionId });
     upsertSessionRow({
       session_id: sessionId,
       status: "running",
@@ -628,8 +632,10 @@
         state.activeChannel.joinRef === ref
       ) {
         state.activeChannel.joined = true;
-        state.selectedLiveStatus = body.response && body.response.status ? body.response.status : state.selectedLiveStatus;
-        updateSelectedStatus(state.selectedLiveStatus);
+        updateSelectedStatus(body.response && body.response.status, {
+          sessionId: pending.sessionId,
+          touchActivity: false
+        });
         setConnectionState("");
         setComposerDisabled(false);
       }
@@ -878,19 +884,34 @@
     });
   }
 
-  function updateSelectedStatus(status) {
-    if (!state.selectedSession) {
-      state.selectedSession = { session_id: state.selectedSessionId };
+  function updateSelectedStatus(status, options) {
+    const sessionId = (options && options.sessionId) || state.selectedSessionId;
+    const touchActivity = !options || options.touchActivity !== false;
+
+    if (!sessionId || !status) {
+      return;
     }
 
-    state.selectedSession.status = status;
-    state.selectedLiveStatus = status;
-    upsertSessionRow({
-      session_id: state.selectedSessionId,
-      status: status,
-      last_event_at: Date.now()
-    });
-    renderSelectedSessionStatus(formatSessionStatus(state.selectedSession));
+    if (state.selectedSessionId === sessionId) {
+      if (!state.selectedSession || state.selectedSession.session_id !== sessionId) {
+        state.selectedSession = { session_id: sessionId };
+      }
+
+      state.selectedSession.status = status;
+      state.selectedLiveStatus = status;
+      renderSelectedSessionStatus(formatSessionStatus(state.selectedSession));
+    }
+
+    const patch = {
+      session_id: sessionId,
+      status: status
+    };
+
+    if (touchActivity) {
+      patch.last_event_at = Date.now();
+    }
+
+    upsertSessionRow(patch);
   }
 
   function formatSessionStatus(session) {

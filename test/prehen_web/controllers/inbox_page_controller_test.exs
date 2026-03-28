@@ -28,7 +28,7 @@ defmodule PrehenWeb.InboxPageControllerTest do
     assert response(css_conn, 200) =~ ".inbox-shell"
   end
 
-  test "browser client source guards stale join replies and scopes async submit failures" do
+  test "browser client source scopes submit ack UI and avoids fake join activity" do
     source = File.read!(@inbox_js)
 
     assert source =~
@@ -59,9 +59,13 @@ defmodule PrehenWeb.InboxPageControllerTest do
 
     assert source =~
              ~r/if \(body\.status === "ok"\) \{(?s:.*?)state\.activeChannel\.joinRef === ref/
+    assert source =~ ~r/touchActivity: false/
 
     assert source =~ ~r/const sessionId = state\.selectedSessionId;(?s:.*?)submitMessage\(sessionId, text\)\.catch/
     assert source =~ ~r/appendSystemNote\(sessionId, extractErrorMessage\(error\)\);/
+    assert source =~
+             ~r/const isStillSelected = state\.selectedSessionId === sessionId;(?s:.*?)if \(isStillSelected\) \{\s*dom\.composerInput\.value = ""/
+
     assert source =~ "rejectPendingRepliesForSession(state.activeChannel.sessionId, \"Channel closed\")"
     assert source =~ ~r/function rejectPendingRepliesForSession\(sessionId, message\) \{/
   end
