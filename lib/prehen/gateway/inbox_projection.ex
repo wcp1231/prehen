@@ -64,7 +64,8 @@ defmodule Prehen.Gateway.InboxProjection do
 
   def handle_call({:session_started, attrs}, _from, state) do
     with {:ok, session_id} <- fetch_required_binary(attrs, :session_id),
-         :ok <- validate_optional_integer(attrs, :created_at) do
+         :ok <- validate_optional_integer(attrs, :created_at),
+         :ok <- validate_optional_agent_name(attrs) do
       case Map.has_key?(state.sessions, session_id) do
         true ->
           {:reply, :ok, state}
@@ -247,7 +248,7 @@ defmodule Prehen.Gateway.InboxProjection do
 
   defp fetch_required_binary(attrs, key) when is_map(attrs) do
     case Map.fetch(attrs, key) do
-      {:ok, value} when is_binary(value) -> {:ok, value}
+      {:ok, value} when is_binary(value) and value != "" -> {:ok, value}
       _ -> :error
     end
   end
@@ -272,4 +273,14 @@ defmodule Prehen.Gateway.InboxProjection do
   end
 
   defp validate_optional_integer(_attrs, _key), do: {:error, :invalid_attrs}
+
+  defp validate_optional_agent_name(attrs) when is_map(attrs) do
+    case Map.fetch(attrs, :agent_name) do
+      :error -> :ok
+      {:ok, value} when is_binary(value) or is_nil(value) -> :ok
+      _ -> {:error, :invalid_attrs}
+    end
+  end
+
+  defp validate_optional_agent_name(_attrs), do: {:error, :invalid_attrs}
 end

@@ -333,4 +333,62 @@ defmodule Prehen.Gateway.InboxProjectionTest do
     assert row == original_row
     assert history == original_history
   end
+
+  test "rejects empty ids and malformed agent_name without disturbing retained state" do
+    assert :ok =
+             InboxProjection.session_started(%{
+               session_id: "gw_ids",
+               agent_name: "fake_stdio",
+               created_at: 1_774_625_000_000
+             })
+
+    assert :ok =
+             InboxProjection.user_message(%{
+               session_id: "gw_ids",
+               message_id: "request_ids",
+               text: "hello"
+             })
+
+    assert {:ok, original_row} = InboxProjection.fetch_session("gw_ids")
+    assert {:ok, original_history} = InboxProjection.fetch_history("gw_ids")
+
+    assert {:error, :invalid_attrs} =
+             InboxProjection.session_started(%{
+               session_id: "",
+               agent_name: "fake_stdio"
+             })
+
+    assert {:error, :invalid_attrs} =
+             InboxProjection.session_started(%{
+               session_id: "gw_bad_agent",
+               agent_name: 123
+             })
+
+    assert {:error, :invalid_attrs} =
+             InboxProjection.user_message(%{
+               session_id: "",
+               message_id: "request_bad",
+               text: "hello"
+             })
+
+    assert {:error, :invalid_attrs} =
+             InboxProjection.user_message(%{
+               session_id: "gw_ids",
+               message_id: "",
+               text: "hello"
+             })
+
+    assert {:error, :invalid_attrs} =
+             InboxProjection.agent_delta(%{
+               session_id: "gw_ids",
+               message_id: "",
+               text: "hello"
+             })
+
+    assert {:ok, row} = InboxProjection.fetch_session("gw_ids")
+    assert {:ok, history} = InboxProjection.fetch_history("gw_ids")
+
+    assert row == original_row
+    assert history == original_history
+  end
 end
