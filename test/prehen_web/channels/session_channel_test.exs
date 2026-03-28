@@ -170,6 +170,32 @@ defmodule PrehenWeb.SessionChannelTest do
     }
   end
 
+  test "pushes a terminal event when monitored worker exits cleanly" do
+    worker_pid = spawn(fn -> receive do :stop -> :ok end end)
+
+    :ok =
+      SessionRegistry.put(%{
+        gateway_session_id: "gw_clean_exit",
+        worker_pid: worker_pid,
+        agent_name: "fake_stdio",
+        agent_session_id: "agent_gw_clean_exit",
+        status: :attached
+      })
+
+    on_exit(fn -> SessionRegistry.delete("gw_clean_exit") end)
+
+    {:ok, _, _socket} =
+      socket(PrehenWeb.UserSocket)
+      |> subscribe_and_join(PrehenWeb.SessionChannel, "session:gw_clean_exit")
+
+    send(worker_pid, :stop)
+
+    assert_push "event", %{
+      "type" => "session.ended",
+      "gateway_session_id" => "gw_clean_exit"
+    }
+  end
+
   test "returns a submit ack payload the inbox browser can correlate" do
     fake_profile = %Prehen.Agents.Profile{
       name: "fake_stdio",
@@ -268,6 +294,28 @@ defmodule PrehenWeb.SessionChannelTest do
              PrehenWeb.SessionChannel.handle_in("submit", %{"text" => "hello"}, socket)
 
     assert returned_socket.assigns.session_id == "gw_terminal"
+  end
+
+  test "returns a read-only join error for retained stopped terminal sessions" do
+    :ok =
+      SessionRegistry.put(%{
+        gateway_session_id: "gw_stopped_terminal",
+        worker_pid: nil,
+        agent_name: "fake_stdio",
+        agent_session_id: "agent_gw_stopped_terminal",
+        status: :stopped
+      })
+
+    on_exit(fn -> SessionRegistry.delete("gw_stopped_terminal") end)
+
+    assert {:error,
+            %{
+              "reason" => "session_read_only",
+              "session_id" => "gw_stopped_terminal",
+              "status" => "stopped"
+            }} =
+             socket(PrehenWeb.UserSocket)
+             |> subscribe_and_join(PrehenWeb.SessionChannel, "session:gw_stopped_terminal")
   end
 
   test "returns session read-only for retained crashed sessions" do
