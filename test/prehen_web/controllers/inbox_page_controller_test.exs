@@ -28,7 +28,7 @@ defmodule PrehenWeb.InboxPageControllerTest do
     assert response(css_conn, 200) =~ ".inbox-shell"
   end
 
-  test "browser client source handles bootstrap, session-switch, and user-facing errors" do
+  test "browser client source guards stale join replies and scopes async submit failures" do
     source = File.read!(@inbox_js)
 
     assert source =~
@@ -54,5 +54,10 @@ defmodule PrehenWeb.InboxPageControllerTest do
     assert source =~ "clearSelectedSessionView(sessionId);"
     assert source =~ "friendlySubmitErrorMessage(response)"
     assert source =~ "Session is read-only."
+    assert source =~
+             ~r/if \(body\.status === "ok"\) \{(?s:.*?)state\.activeChannel\.joinRef === ref/
+
+    assert source =~ ~r/const sessionId = state\.selectedSessionId;(?s:.*?)submitMessage\(sessionId, text\)\.catch/
+    assert source =~ ~r/appendSystemNote\(sessionId, extractErrorMessage\(error\)\);/
   end
 end

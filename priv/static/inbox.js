@@ -70,15 +70,16 @@
     dom.composer.addEventListener("submit", function (event) {
       event.preventDefault();
 
+      const sessionId = state.selectedSessionId;
       const text = dom.composerInput.value.trim();
 
-      if (!text || !state.selectedSessionId) {
+      if (!text || !sessionId) {
         return;
       }
 
-      submitMessage(state.selectedSessionId, text).catch(function (error) {
+      submitMessage(sessionId, text).catch(function (error) {
         if (!error || !error.handled) {
-          appendSystemNote(state.selectedSessionId, extractErrorMessage(error));
+          appendSystemNote(sessionId, extractErrorMessage(error));
         }
       });
     });
@@ -615,7 +616,12 @@
     state.pendingReplies.delete(ref);
 
     if (body.status === "ok") {
-      if (pending.type === "join" && state.activeChannel && state.activeChannel.topic === topic) {
+      if (
+        pending.type === "join" &&
+        state.activeChannel &&
+        state.activeChannel.topic === topic &&
+        state.activeChannel.joinRef === ref
+      ) {
         state.activeChannel.joined = true;
         state.selectedLiveStatus = body.response && body.response.status ? body.response.status : state.selectedLiveStatus;
         updateSelectedStatus(state.selectedLiveStatus);
