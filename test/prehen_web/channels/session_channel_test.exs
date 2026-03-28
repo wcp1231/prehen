@@ -68,6 +68,33 @@ defmodule PrehenWeb.SessionChannelTest do
     assert_push "event", %{"type" => "session.output.delta", "gateway_session_id" => "gw_1"}
   end
 
+  test "returns inbox-friendly metadata in the join payload" do
+    worker_pid = spawn(fn -> receive do :stop -> :ok end end)
+
+    :ok =
+      SessionRegistry.put(%{
+        gateway_session_id: "gw_join",
+        worker_pid: worker_pid,
+        agent_name: "fake_stdio",
+        agent_session_id: "agent_gw_join",
+        status: :running
+      })
+
+    on_exit(fn ->
+      SessionRegistry.delete("gw_join")
+      Process.exit(worker_pid, :kill)
+    end)
+
+    assert {:ok,
+            %{
+              "session_id" => "gw_join",
+              "status" => "running",
+              "agent_name" => "fake_stdio"
+            }, _socket} =
+             socket(PrehenWeb.UserSocket)
+             |> subscribe_and_join(PrehenWeb.SessionChannel, "session:gw_join")
+  end
+
   test "returns clean attach error when gateway session does not exist" do
     assert {:error, %{"reason" => "session_not_found"}} =
              socket(PrehenWeb.UserSocket)
@@ -149,5 +176,19 @@ defmodule PrehenWeb.SessionChannelTest do
 
     ref = push(socket, "submit", %{"text" => "hello"})
     assert_reply ref, :ok, %{"request_id" => _request_id}
+  end
+
+  test "returns submit failures with the unavailable session id" do
+    socket =
+      socket(PrehenWeb.UserSocket, "user_1", %{})
+      |> Phoenix.Socket.assign(:session_id, "missing_session")
+
+    assert {:reply,
+            {:error,
+             %{"reason" => "session_unavailable", "session_id" => "missing_session"}},
+            returned_socket} =
+             PrehenWeb.SessionChannel.handle_in("submit", %{"text" => "hello"}, socket)
+
+    assert returned_socket.assigns.session_id == "missing_session"
   end
 end
