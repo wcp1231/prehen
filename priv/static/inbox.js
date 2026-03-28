@@ -996,6 +996,7 @@
     state.selectedSession = { session_id: sessionId };
     state.selectedHistory = [];
     state.selectedLiveStatus = null;
+    dom.composerInput.value = "";
     renderSelectedSessionStatus("Loading session " + sessionId + "...");
     renderEmptyHistory("Loading session history...");
     setComposerDisabled(true);

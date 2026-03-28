@@ -78,6 +78,9 @@ defmodule PrehenWeb.InboxPageControllerTest do
     assert source =~
              ~r/const isStillSelected = state\.selectedSessionId === sessionId;(?s:.*?)if \(isStillSelected\) \{\s*dom\.composerInput\.value = ""/
 
+    assert source =~
+             ~r/function clearSelectedSessionView\(sessionId\) \{(?s:.*?)dom\.composerInput\.value = ""(?s:.*?)setComposerDisabled\(true\);/
+
     assert source =~ "rejectPendingRepliesForSession(state.activeChannel.sessionId, \"Channel closed\")"
     assert source =~ ~r/function rejectPendingRepliesForSession\(sessionId, message\) \{/
   end
