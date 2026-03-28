@@ -20,7 +20,7 @@ defmodule PrehenWeb.InboxPageControllerTest do
     assert body =~ ~s(<script src="/inbox.js")
   end
 
-  test "browser client source guards stale sockets and preserves session-scoped helpers" do
+  test "browser client source guards stale joins and reorders sessions by latest activity" do
     source = File.read!(@inbox_js)
 
     assert source =~
@@ -37,5 +37,10 @@ defmodule PrehenWeb.InboxPageControllerTest do
     assert source =~ ~r/function handleSocketOpen\(socket\) \{(?s:.*?)if \(socket !== state\.socket\) \{\s*return;\s*\}/
     assert source =~ ~r/function handleSocketClose\(socket\) \{(?s:.*?)if \(socket !== state\.socket\) \{\s*return;\s*\}/
     assert source =~ ~r/function handleSocketMessage\(socket, event\) \{(?s:.*?)if \(socket !== state\.socket\) \{\s*return;\s*\}/
+    assert source =~
+             ~r/if \(eventName === "phx_error" \|\| eventName === "phx_close"\) \{(?s:.*?)joinRef === state\.activeChannel\.joinRef/
+
+    assert source =~ "sortSessionsByActivity()"
+    assert source =~ ~r/function sortSessionsByActivity\(\) \{/
   end
 end

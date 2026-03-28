@@ -92,6 +92,7 @@
 
     state.agents = Array.isArray(agentsResponse.agents) ? agentsResponse.agents : [];
     state.sessions = Array.isArray(sessionsResponse.sessions) ? sessionsResponse.sessions : [];
+    sortSessionsByActivity();
 
     renderAgentSelect();
     renderSessionList();
@@ -566,6 +567,7 @@
       return;
     }
 
+    const joinRef = payload[0];
     const ref = payload[1];
     const topic = payload[2];
     const eventName = payload[3];
@@ -577,7 +579,11 @@
     }
 
     if (eventName === "phx_error" || eventName === "phx_close") {
-      if (state.activeChannel && topic === state.activeChannel.topic) {
+      if (
+        state.activeChannel &&
+        topic === state.activeChannel.topic &&
+        joinRef === state.activeChannel.joinRef
+      ) {
         state.activeChannel.joined = false;
         setConnectionState("disconnected");
         setComposerDisabled(true);
@@ -816,10 +822,31 @@
 
     if (index === -1) {
       state.sessions.unshift(sessionPatch);
+      sortSessionsByActivity();
       return;
     }
 
     state.sessions[index] = Object.assign({}, state.sessions[index], sessionPatch);
+    sortSessionsByActivity();
+  }
+
+  function sortSessionsByActivity() {
+    state.sessions.sort(function (left, right) {
+      const leftActivity = left.last_event_at || left.created_at || 0;
+      const rightActivity = right.last_event_at || right.created_at || 0;
+      const leftCreatedAt = left.created_at || 0;
+      const rightCreatedAt = right.created_at || 0;
+
+      if (rightActivity !== leftActivity) {
+        return rightActivity - leftActivity;
+      }
+
+      if (rightCreatedAt !== leftCreatedAt) {
+        return rightCreatedAt - leftCreatedAt;
+      }
+
+      return String(left.session_id || "").localeCompare(String(right.session_id || ""));
+    });
   }
 
   function updateSelectedStatus(status) {
