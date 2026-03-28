@@ -166,7 +166,7 @@ defmodule PrehenWeb.SessionChannelTest do
 
     assert_push "event", %{
       "type" => "session.crashed",
-      "session_id" => "gw_down"
+      "gateway_session_id" => "gw_down"
     }
   end
 

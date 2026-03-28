@@ -90,7 +90,7 @@ defmodule PrehenWeb.SessionChannel do
 
     push(socket, "event", %{
       "type" => event_type,
-      "session_id" => socket.assigns.session_id,
+      "gateway_session_id" => socket.assigns.session_id,
       "reason" => inspect(reason)
     })
 
