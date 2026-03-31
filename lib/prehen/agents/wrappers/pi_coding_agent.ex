@@ -5,12 +5,12 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
   alias Prehen.Agents.PromptContext
   alias Prehen.Agents.SessionConfig
   alias Prehen.Agents.Wrapper
-  alias Prehen.Agents.Wrappers.ExecutableHost
   alias Prehen.Agents.Wrappers.Passthrough
   alias Prehen.Config
 
   @behaviour Wrapper
 
+  @support_probe_gateway_session_id "gw_pi_support_probe"
   @shell_command System.find_executable("sh") || "/bin/sh"
   @rejected_workspace_policy_modes ~w(disabled off unmanaged)
 
@@ -53,15 +53,16 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
   @impl Wrapper
   def support_check(%{__struct__: SessionConfig} = session_config) do
     with {:ok, launch} <- build_launch_spec(session_config),
-         {:ok, _target} <- classify_target_resolution(launch),
-         :ok <- classify_passthrough_support(launch) do
-      :ok
+         {:ok, wrapper} <- start_link(session_config: session_config) do
+      try do
+        wrapper
+        |> open_session(probe_open_session_attrs(session_config, launch))
+        |> classify_runtime_probe_result()
+      after
+        maybe_stop_wrapper(wrapper)
+      end
     else
-      {:error, reason} when reason in [:capability_failed, :contract_failed, :policy_rejected] ->
-        {:error, reason}
-
-      {:error, _reason} ->
-        {:error, :launch_failed}
+      {:error, reason} -> classify_preflight_error(reason)
     end
   end
 
@@ -178,17 +179,6 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
      ["-lc", "cd \"$1\" && shift && exec \"$@\"", "prehen-pi", workspace, command | args]}
   end
 
-  defp classify_target_resolution(%{executable: executable}) do
-    ExecutableHost.resolve_command(executable)
-  end
-
-  defp classify_passthrough_support(launch) do
-    case ExecutableHost.support_check(%{command: launch.runtime_command}) do
-      :ok -> :ok
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
   defp workspace_root(session_config) do
     case normalize_optional_string(Map.get(session_config, :workspace)) do
       nil ->
@@ -281,4 +271,85 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
       {:error, _reason} -> {:error, :capability_failed}
     end
   end
+
+  defp probe_open_session_attrs(session_config, launch) do
+    %{
+      gateway_session_id: @support_probe_gateway_session_id,
+      agent: Map.get(session_config, :profile_name),
+      profile_name: Map.get(session_config, :profile_name),
+      provider: Map.get(session_config, :provider),
+      model: Map.get(session_config, :model),
+      prompt_profile: Map.get(session_config, :prompt_profile),
+      workspace: launch.cwd,
+      prompt: decode_probe_prompt(launch.prompt_payload)
+    }
+  end
+
+  defp decode_probe_prompt(prompt_payload) when is_binary(prompt_payload) do
+    case Jason.decode(prompt_payload) do
+      {:ok, decoded} -> decoded
+      {:error, _reason} -> %{"system" => prompt_payload}
+    end
+  end
+
+  defp classify_runtime_probe_result({:ok, opened}) do
+    case fetch_agent_session_id(opened) do
+      {:ok, _agent_session_id} -> :ok
+      :error -> {:error, :contract_failed}
+    end
+  end
+
+  defp classify_runtime_probe_result({:error, reason}) do
+    case reason do
+      :timeout -> {:error, :contract_failed}
+      :missing_gateway_session_id -> {:error, :contract_failed}
+      :session_already_open -> {:error, :contract_failed}
+      :session_already_opening -> {:error, :contract_failed}
+      :session_not_open -> {:error, :contract_failed}
+      {:missing_required_field, _key} -> {:error, :contract_failed}
+      {:timeout, _detail} -> {:error, :contract_failed}
+      _other -> {:error, :launch_failed}
+    end
+  end
+
+  defp classify_runtime_probe_result(_other), do: {:error, :contract_failed}
+
+  defp classify_preflight_error(reason)
+       when reason in [:capability_failed, :contract_failed, :policy_rejected],
+       do: {:error, reason}
+
+  defp classify_preflight_error(_reason), do: {:error, :launch_failed}
+
+  defp fetch_agent_session_id(%{agent_session_id: agent_session_id})
+       when is_binary(agent_session_id) and agent_session_id != "",
+       do: {:ok, agent_session_id}
+
+  defp fetch_agent_session_id(%{"agent_session_id" => agent_session_id})
+       when is_binary(agent_session_id) and agent_session_id != "",
+       do: {:ok, agent_session_id}
+
+  defp fetch_agent_session_id(%{payload: payload}) when is_map(payload),
+    do: fetch_agent_session_id(payload)
+
+  defp fetch_agent_session_id(%{"payload" => payload}) when is_map(payload),
+    do: fetch_agent_session_id(payload)
+
+  defp fetch_agent_session_id(_opened), do: :error
+
+  defp maybe_stop_wrapper(wrapper) when is_pid(wrapper) do
+    if Process.alive?(wrapper) do
+      try do
+        stop(wrapper)
+        :ok
+      rescue
+        _error -> :ok
+      catch
+        :exit, _reason -> :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  defp maybe_stop_wrapper(_wrapper), do: :ok
 end

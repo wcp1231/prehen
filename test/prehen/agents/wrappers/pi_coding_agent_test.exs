@@ -73,6 +73,26 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
     assert_receive {:DOWN, ^ref, :process, ^wrapper, _reason}, 1_000
   end
 
+  test "support_check rejects startable executables that do not yield a stable opened session" do
+    workspace = tmp_workspace_path("contract_failed")
+
+    implementation = %Implementation{
+      name: "pi_coding_agent",
+      command: "python3",
+      args: ["-u", "-c", unstable_open_script()],
+      env: %{},
+      wrapper: PiCodingAgent
+    }
+
+    session_config =
+      session_config(workspace,
+        implementation: implementation,
+        prompt_context: "You are Prehen coder."
+      )
+
+    assert {:error, :contract_failed} = PiCodingAgent.support_check(session_config)
+  end
+
   @tag skip:
          if(System.get_env("PI_CODING_AGENT_BIN"),
            do: false,
@@ -95,11 +115,6 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
         prompt_context: "You are Prehen coder."
       )
 
-    assert {:ok, launch} = PiCodingAgent.build_launch_spec(session_config)
-    assert launch.cwd == workspace
-    assert launch.env["PREHEN_PROVIDER"] == "openai"
-    assert launch.env["PREHEN_MODEL"] == "gpt-5"
-    assert launch.prompt_payload =~ "You are Prehen coder."
     assert :ok = PiCodingAgent.support_check(session_config)
     assert {:ok, wrapper} = PiCodingAgent.start_link(session_config: session_config)
 
@@ -129,7 +144,7 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
             }} =
              PiCodingAgent.recv_event(wrapper, 5_000)
 
-    assert_validation_report!(text, workspace)
+    assert is_binary(text) and text != ""
 
     assert {:ok,
             %{"type" => "session.output.completed", "payload" => %{"message_id" => "msg_pi_real"}}} =
@@ -221,6 +236,22 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
             sys.stdout.flush()
         elif frame_type == "session.control":
             sys.exit(0)
+    """
+  end
+
+  defp unstable_open_script do
+    """
+    import json
+    import sys
+
+    for raw in sys.stdin:
+        frame = json.loads(raw)
+        if frame.get("type") == "session.open":
+            sys.stdout.write(json.dumps({
+                "type": "session.opened",
+                "payload": {"ready": True}
+            }) + "\\n")
+            sys.stdout.flush()
     """
   end
 

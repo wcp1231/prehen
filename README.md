@@ -96,7 +96,7 @@ config :prehen,
 
 The wrapper owns `cwd`, prompt payload, provider, model, and workspace env injection before the executable is opened.
 Set `PI_CODING_AGENT_BIN` only when you want the focused wrapper validation test to hit a concrete local executable:
-the opt-in test expects that executable to emit a JSON validation report in its first output delta so the injected contract can be asserted end to end.
+the opt-in test is a smoke path that verifies wrapper startup, session open, one message round-trip, and stop/cancel behavior against the configured binary.
 
 ```bash
 PI_CODING_AGENT_BIN=/abs/path/to/pi-coding-agent mix test test/prehen/agents/wrappers/pi_coding_agent_test.exs
