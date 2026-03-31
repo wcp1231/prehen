@@ -88,8 +88,13 @@ def main():
             env=child_env,
         )
     except FileNotFoundError as exc:
-        emit({"type": "stderr", "data": base64.b64encode(str(exc).encode("utf-8")).decode("ascii")})
-        emit({"type": "exit_status", "status": 127})
+        emit_spawn_error(exc, 127)
+        return
+    except PermissionError as exc:
+        emit_spawn_error(exc, 126)
+        return
+    except OSError as exc:
+        emit_spawn_error(exc, 126)
         return
 
     selector = selectors.DefaultSelector()
@@ -136,6 +141,11 @@ def main():
             emit({"type": stream_type, "data": base64.b64encode(chunk).decode("ascii")})
 
     status = PROCESS.wait()
+    emit({"type": "exit_status", "status": status})
+
+
+def emit_spawn_error(exc, status):
+    emit({"type": "stderr", "data": base64.b64encode(str(exc).encode("utf-8")).decode("ascii")})
     emit({"type": "exit_status", "status": status})
 
 

@@ -2,6 +2,7 @@ defmodule Prehen.Agents.Wrappers.ExecutableHost do
   @moduledoc false
 
   use GenServer
+  import Bitwise
 
   @type command_spec :: %{
           required(:command) => String.t(),
@@ -111,6 +112,7 @@ defmodule Prehen.Agents.Wrappers.ExecutableHost do
   def resolve_command(command) when is_binary(command) do
     case System.find_executable(command) || take_path_command(command) do
       nil -> {:error, {:command_not_found, command}}
+      {:error, reason} -> {:error, reason}
       executable -> {:ok, executable}
     end
   end
@@ -118,7 +120,25 @@ defmodule Prehen.Agents.Wrappers.ExecutableHost do
   def resolve_command(_command), do: {:error, :invalid_command}
 
   defp take_path_command(command) do
-    if String.contains?(command, "/"), do: command
+    if String.contains?(command, "/") do
+      validate_path_command(command)
+    end
+  end
+
+  defp validate_path_command(command) do
+    case File.stat(command) do
+      {:ok, %File.Stat{type: :regular, mode: mode}} when (mode &&& 0o111) != 0 ->
+        command
+
+      {:ok, %File.Stat{type: :regular}} ->
+        {:error, {:command_not_executable, command}}
+
+      {:ok, _stat} ->
+        {:error, {:command_not_executable, command}}
+
+      {:error, _reason} ->
+        nil
+    end
   end
 
   defp open_port(command, args, env) do
