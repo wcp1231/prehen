@@ -64,7 +64,9 @@ defmodule Prehen.Agents.Transports.Stdio do
          buffer: "",
          open_from: nil,
          pending_frames: :queue.new(),
-         recv_from: nil
+         recv_from: nil,
+         recv_request_ref: nil,
+         recv_timer_ref: nil
        }}
     end
   end
@@ -72,11 +74,10 @@ defmodule Prehen.Agents.Transports.Stdio do
   @impl GenServer
   def handle_call({:open_session, attrs}, from, %{open_from: nil} = state) do
     frame =
-      Frame.session_open(
-        gateway_session_id: state.gateway_session_id,
-        agent: state.profile.name,
-        workspace: Map.get(attrs, :workspace)
-      )
+      attrs
+      |> Map.put(:gateway_session_id, state.gateway_session_id)
+      |> Map.put_new(:agent, state.profile.name)
+      |> Frame.session_open()
 
     case write_frame(state.host, frame) do
       :ok -> {:noreply, %{state | open_from: from}}
@@ -97,13 +98,22 @@ defmodule Prehen.Agents.Transports.Stdio do
     {:reply, {:error, :recv_waiter_already_registered}, state}
   end
 
-  def handle_call({:recv_frame, _timeout}, from, %{pending_frames: pending_frames} = state) do
+  def handle_call({:recv_frame, timeout}, from, %{pending_frames: pending_frames} = state) do
     case :queue.out(pending_frames) do
       {{:value, frame}, rest} ->
         {:reply, {:ok, frame}, %{state | pending_frames: rest}}
 
       {:empty, _queue} ->
-        {:noreply, %{state | recv_from: from}}
+        request_ref = make_ref()
+        timer_ref = Process.send_after(self(), {:recv_timeout, request_ref}, timeout)
+
+        {:noreply,
+         %{
+           state
+           | recv_from: from,
+             recv_request_ref: request_ref,
+             recv_timer_ref: timer_ref
+         }}
     end
   end
 
@@ -127,7 +137,7 @@ defmodule Prehen.Agents.Transports.Stdio do
       ) do
     if from, do: GenServer.reply(from, {:error, {:exit_status, status}})
     if recv_from, do: GenServer.reply(recv_from, {:error, {:exit_status, status}})
-    {:stop, :normal, %{state | open_from: nil, recv_from: nil}}
+    {:stop, :normal, clear_recv_waiter(%{state | open_from: nil})}
   end
 
   def handle_info(
@@ -136,7 +146,16 @@ defmodule Prehen.Agents.Transports.Stdio do
       ) do
     if from, do: GenServer.reply(from, {:error, reason})
     if recv_from, do: GenServer.reply(recv_from, {:error, reason})
-    {:stop, :normal, %{state | open_from: nil, recv_from: nil}}
+    {:stop, :normal, clear_recv_waiter(%{state | open_from: nil})}
+  end
+
+  def handle_info(
+        {:recv_timeout, request_ref},
+        %{recv_request_ref: request_ref, recv_from: from} = state
+      )
+      when not is_nil(from) do
+    GenServer.reply(from, {:error, :timeout})
+    {:noreply, clear_recv_waiter(state)}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -206,11 +225,22 @@ defmodule Prehen.Agents.Transports.Stdio do
 
   defp enqueue_frame(%{recv_from: recv_from} = state, frame) when not is_nil(recv_from) do
     GenServer.reply(recv_from, {:ok, frame})
-    %{state | recv_from: nil}
+    clear_recv_waiter(state)
   end
 
   defp enqueue_frame(%{pending_frames: pending_frames} = state, frame) do
     %{state | pending_frames: :queue.in(frame, pending_frames)}
+  end
+
+  defp clear_recv_waiter(state) do
+    if state.recv_timer_ref, do: Process.cancel_timer(state.recv_timer_ref)
+
+    %{
+      state
+      | recv_from: nil,
+        recv_request_ref: nil,
+        recv_timer_ref: nil
+    }
   end
 
   defp profile_command(%Profile{command: [command | _args]}), do: command

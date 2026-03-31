@@ -2,80 +2,130 @@ defmodule Prehen.Gateway.SessionWorkerTest do
   use ExUnit.Case, async: false
 
   alias Prehen.Agents.Envelope
-  alias Prehen.Agents.Profile
+  alias Prehen.Agents.Implementation
+  alias Prehen.Agents.SessionConfig
+  alias Prehen.Agents.Wrapper
+  alias Prehen.Gateway.InboxProjection
   alias Prehen.Gateway.SessionRegistry
   alias Prehen.Gateway.SessionWorker
 
-  defmodule BrokenOpenTransport do
-    def start_link(opts) do
-      profile = Keyword.fetch!(opts, :profile)
-      test_pid = profile.metadata.test_pid
-      pid = spawn(fn -> Process.sleep(:infinity) end)
-      send(test_pid, {:broken_transport_started, pid})
-      {:ok, pid}
+  defmodule BrokenOpenWrapper do
+    use GenServer
+
+    @behaviour Wrapper
+
+    @impl Wrapper
+    def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+    @impl Wrapper
+    def open_session(wrapper, attrs), do: GenServer.call(wrapper, {:open_session, attrs})
+
+    @impl Wrapper
+    def send_message(_wrapper, _attrs), do: :ok
+
+    @impl Wrapper
+    def send_control(_wrapper, _attrs), do: :ok
+
+    @impl Wrapper
+    def recv_event(_wrapper, _timeout), do: {:error, :closed}
+
+    @impl Wrapper
+    def support_check(_session_config), do: :ok
+
+    @impl Wrapper
+    def stop(wrapper), do: GenServer.stop(wrapper)
+
+    @impl true
+    def init(opts) do
+      test_pid = Keyword.get(opts, :test_pid)
+      if is_pid(test_pid), do: send(test_pid, {:broken_wrapper_started, self()})
+      {:ok, %{test_pid: test_pid}}
     end
 
-    def open_session(_transport, _attrs), do: {:error, :open_failed}
-    def recv_frame(_transport, _timeout), do: {:error, :closed}
-    def send_message(_transport, _attrs), do: :ok
-    def send_control(_transport, _attrs), do: :ok
-
-    def stop(transport) when is_pid(transport) do
-      if Process.alive?(transport), do: Process.exit(transport, :kill)
-      :ok
+    @impl true
+    def handle_call({:open_session, _attrs}, _from, state) do
+      {:stop, :normal, {:error, :open_failed}, state}
     end
   end
 
   setup do
     previous_trap_exit = Process.flag(:trap_exit, true)
-    original_state = :sys.get_state(Prehen.Agents.Registry)
-
-    fake_profile = %Profile{
-      name: "fake_stdio",
-      command: ["mix", "run", "--no-start", "test/support/fake_stdio_agent.exs"]
-    }
-
-    :sys.replace_state(Prehen.Agents.Registry, fn _ ->
-      %{ordered: [fake_profile], by_name: %{"fake_stdio" => fake_profile}}
-    end)
+    InboxProjection.reset()
 
     on_exit(fn ->
       Process.flag(:trap_exit, previous_trap_exit)
-      :sys.replace_state(Prehen.Agents.Registry, fn _ -> original_state end)
+      InboxProjection.reset()
     end)
 
     :ok
   end
 
-  test "forwards normalized output delta events with gateway session metadata" do
-    assert {:ok, pid} =
-             SessionWorker.start_link(
+  test "forwards normalized output delta events through registry inbox projection and pubsub" do
+    Phoenix.PubSub.subscribe(Prehen.PubSub, "session:gw_1")
+
+    assert {:ok, %{worker_pid: pid, gateway_session_id: "gw_1"}} =
+             SessionWorker.start_session(
+               session_config(),
                gateway_session_id: "gw_1",
-               agent_name: "fake_stdio",
                test_pid: self()
              )
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        DynamicSupervisor.terminate_child(Prehen.Gateway.SessionWorkerSupervisor, pid)
+      end
+    end)
 
     assert :ok =
              SessionWorker.submit_message(pid, %{
                role: "user",
+               message_id: "msg_1",
                parts: [%{type: "text", text: "hi"}]
              })
 
-    assert {:ok, %{agent_session_id: "agent_gw_1", status: :running}} =
-             SessionRegistry.fetch("gw_1")
+    assert {:ok,
+            %{
+              agent_name: "fake_stdio",
+              provider: "openai",
+              model: "gpt-5",
+              prompt_profile: "fake_default",
+              status: :running,
+              agent_session_id: agent_session_id
+            }} = SessionRegistry.fetch("gw_1")
+
+    assert is_binary(agent_session_id)
 
     assert_receive {:gateway_event, event}
     assert event.type == "session.output.delta"
     assert event.gateway_session_id == "gw_1"
-    assert event.agent_session_id == "agent_gw_1"
+    assert event.agent_session_id == agent_session_id
     assert event.agent == "fake_stdio"
     assert event.seq == 1
 
     assert event.payload == %{
-             "agent_session_id" => "agent_gw_1",
-             "message_id" => "message_1",
+             "agent_session_id" => agent_session_id,
+             "message_id" => "msg_1",
              "text" => "hi"
            }
+
+    assert_receive {:gateway_event, pubsub_event}
+    assert pubsub_event.type == "session.output.delta"
+    assert pubsub_event.gateway_session_id == "gw_1"
+
+    assert {:ok, %{status: :idle, agent_name: "fake_stdio"}} =
+             wait_until(fn ->
+               case InboxProjection.fetch_session("gw_1") do
+                 {:ok, %{status: :idle} = row} -> {:ok, row}
+                 _ -> :retry
+               end
+             end)
+
+    assert {:ok, history} = InboxProjection.fetch_history("gw_1")
+
+    assert Enum.map(history, &Map.take(&1, [:kind, :message_id, :text])) == [
+             %{kind: :user_message, message_id: "msg_1", text: "hi"},
+             %{kind: :assistant_message, message_id: "msg_1", text: "hi"}
+           ]
   end
 
   test "envelope normalizes explicit nil payload and metadata" do
@@ -93,50 +143,76 @@ defmodule Prehen.Gateway.SessionWorkerTest do
     assert event.metadata == %{}
   end
 
-  test "retains terminal registry metadata when worker terminates after transport failure" do
-    assert {:ok, pid} =
-             SessionWorker.start_link(
-               gateway_session_id: "gw_cleanup",
-               agent_name: "fake_stdio",
+  test "retains terminal registry metadata when wrapper startup fails" do
+    assert {:error, :open_failed} =
+             SessionWorker.start_session(
+               session_config(
+                 profile_name: "broken_stdio",
+                 implementation:
+                   implementation(
+                     name: "broken_impl",
+                     command: "noop",
+                     args: [],
+                     wrapper: BrokenOpenWrapper
+                   )
+               ),
+               gateway_session_id: "gw_broken",
                test_pid: self()
              )
 
-    assert {:ok, %{status: :attached}} = SessionRegistry.fetch("gw_cleanup")
+    assert_receive {:broken_wrapper_started, wrapper_pid}, 1_000
+    ref = Process.monitor(wrapper_pid)
+    assert_receive {:DOWN, ^ref, :process, ^wrapper_pid, _reason}, 1_000
 
-    monitor_ref = Process.monitor(pid)
-    transport_pid = :sys.get_state(pid).transport
-    Process.exit(transport_pid, :kill)
-
-    assert_receive {:DOWN, ^monitor_ref, :process, ^pid, _reason}, 2_000
-
-    assert {:ok, session} = SessionRegistry.fetch("gw_cleanup")
+    assert {:ok, session} = SessionRegistry.fetch("gw_broken")
     assert session.status == :crashed
     assert session.worker_pid == nil
-    assert session.agent_name == "fake_stdio"
-    assert session.agent_session_id == "agent_gw_cleanup"
+    assert session.agent_name == "broken_stdio"
+    assert session.provider == "openai"
+    assert session.model == "gpt-5"
+    assert session.prompt_profile == "fake_default"
+    assert session.workspace == "/tmp/prehen_worker_test"
+    refute Map.has_key?(session, :agent_session_id)
   end
 
-  test "stops started transport when init fails after transport start" do
-    broken_profile = %Profile{
-      name: "broken_stdio",
-      command: ["noop"],
-      transport: BrokenOpenTransport,
-      metadata: %{test_pid: self()}
+  defp session_config(overrides \\ []) do
+    base = %SessionConfig{
+      profile_name: "fake_stdio",
+      provider: "openai",
+      model: "gpt-5",
+      prompt_profile: "fake_default",
+      workspace_policy: %{mode: "scoped"},
+      implementation: implementation(),
+      workspace: "/tmp/prehen_worker_test"
     }
 
-    :sys.replace_state(Prehen.Agents.Registry, fn _ ->
-      %{ordered: [broken_profile], by_name: %{"broken_stdio" => broken_profile}}
-    end)
-
-    assert {:error, :open_failed} =
-             SessionWorker.start_link(
-               gateway_session_id: "gw_broken",
-               agent_name: "broken_stdio",
-               test_pid: self()
-             )
-
-    assert_receive {:broken_transport_started, transport_pid}, 1_000
-    ref = Process.monitor(transport_pid)
-    assert_receive {:DOWN, ^ref, :process, ^transport_pid, _reason}, 1_000
+    struct!(base, Enum.into(overrides, %{}))
   end
+
+  defp implementation(overrides \\ []) do
+    base = %Implementation{
+      name: "fake_stdio_impl",
+      command: "mix",
+      args: ["run", "--no-start", "test/support/fake_wrapper_agent.exs"],
+      env: %{},
+      wrapper: Prehen.Agents.Wrappers.Passthrough
+    }
+
+    struct!(base, Enum.into(overrides, %{}))
+  end
+
+  defp wait_until(fun, attempts \\ 20)
+
+  defp wait_until(fun, attempts) when attempts > 0 do
+    case fun.() do
+      {:ok, value} ->
+        {:ok, value}
+
+      :retry ->
+        Process.sleep(25)
+        wait_until(fun, attempts - 1)
+    end
+  end
+
+  defp wait_until(_fun, 0), do: {:error, :timeout}
 end

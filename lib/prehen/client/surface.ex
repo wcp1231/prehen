@@ -15,6 +15,9 @@ defmodule Prehen.Client.Surface do
   """
 
   alias Prehen.Agent.EventBridge
+  alias Prehen.Agents.Implementation
+  alias Prehen.Agents.Profile
+  alias Prehen.Agents.SessionConfig
   alias Prehen.Config
   alias Prehen.Gateway.Router
   alias Prehen.Gateway.SessionRegistry
@@ -27,11 +30,12 @@ defmodule Prehen.Client.Surface do
   @spec create_session(keyword()) :: {:ok, map()} | {:error, map()}
   def create_session(opts \\ []) do
     with {:ok, profile} <- Router.select_agent(opts),
-         {:ok, session} <- SessionWorker.start_session(profile, opts) do
+         {:ok, session_config} <- resolve_session_config(profile, opts),
+         {:ok, session} <- SessionWorker.start_session(session_config, opts) do
       {:ok,
        %{
          session_id: session.gateway_session_id,
-         agent: profile.name
+         agent: session_config.profile_name
        }}
     else
       {:error, reason} ->
@@ -279,6 +283,64 @@ defmodule Prehen.Client.Surface do
   end
 
   defp normalize_session_id(session_id), do: to_string(session_id)
+
+  defp resolve_session_config(%Profile{} = profile, opts) do
+    with {:ok, implementation} <- implementation_from_profile(profile) do
+      {:ok,
+       %SessionConfig{
+         profile_name: profile.name,
+         provider:
+           normalize_optional_string(Keyword.get(opts, :provider)) || profile.default_provider,
+         model: normalize_optional_string(Keyword.get(opts, :model)) || profile.default_model,
+         prompt_profile:
+           normalize_optional_string(Keyword.get(opts, :prompt_profile)) || profile.prompt_profile,
+         workspace_policy: profile.workspace_policy,
+         implementation: implementation,
+         workspace: normalize_optional_string(Keyword.get(opts, :workspace))
+       }}
+    end
+  end
+
+  defp implementation_from_profile(%Profile{} = profile) do
+    with {:ok, command, args} <- normalize_command(profile),
+         {:ok, wrapper} <- normalize_wrapper(profile.wrapper) do
+      {:ok,
+       %Implementation{
+         name: profile.implementation || profile.name,
+         command: command,
+         args: args,
+         env: normalize_env(profile.env),
+         wrapper: wrapper
+       }}
+    end
+  end
+
+  defp normalize_command(%Profile{command: [command | args]})
+       when is_binary(command) and command != "" do
+    {:ok, command, Enum.map(args, &to_string/1)}
+  end
+
+  defp normalize_command(%Profile{command: command, args: args})
+       when is_binary(command) and command != "" do
+    {:ok, command, Enum.map(args || [], &to_string/1)}
+  end
+
+  defp normalize_command(_profile), do: {:error, :missing_command}
+
+  defp normalize_wrapper(wrapper) when is_atom(wrapper), do: {:ok, wrapper}
+  defp normalize_wrapper(_wrapper), do: {:error, :missing_wrapper}
+
+  defp normalize_env(env) when is_map(env), do: env
+  defp normalize_env(_env), do: %{}
+
+  defp normalize_optional_string(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp normalize_optional_string(_value), do: nil
 
   defp error_payload(type, reason) do
     %{

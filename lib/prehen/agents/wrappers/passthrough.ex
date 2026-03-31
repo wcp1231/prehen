@@ -12,6 +12,8 @@ defmodule Prehen.Agents.Wrappers.Passthrough do
 
   @behaviour Wrapper
   @open_session_timeout_ms 16_000
+  @recv_poll_timeout_ms 100
+  @recv_call_slack_ms 300
 
   @impl Wrapper
   def start_link(opts) do
@@ -35,7 +37,8 @@ defmodule Prehen.Agents.Wrappers.Passthrough do
 
   @impl Wrapper
   def recv_event(wrapper, timeout \\ 5_000) when is_pid(wrapper) do
-    GenServer.call(wrapper, {:recv_event, timeout}, timeout + 100)
+    bounded_timeout = min(timeout, @recv_poll_timeout_ms)
+    GenServer.call(wrapper, {:recv_event, bounded_timeout}, bounded_timeout + @recv_call_slack_ms)
   end
 
   @impl Wrapper
@@ -74,12 +77,13 @@ defmodule Prehen.Agents.Wrappers.Passthrough do
     session_config = state.session_config
     workspace = fetch_optional_value(attrs, :workspace) || session_config.workspace
     profile = build_profile(session_config)
+    open_attrs = Map.put(attrs, :workspace, workspace)
 
     case fetch_required_value(attrs, :gateway_session_id) do
       {:ok, gateway_session_id} ->
         case Stdio.start_link(profile: profile, gateway_session_id: gateway_session_id) do
           {:ok, transport} ->
-            case Stdio.open_session(transport, %{workspace: workspace}) do
+            case Stdio.open_session(transport, open_attrs) do
               {:ok, %{agent_session_id: agent_session_id} = opened} ->
                 {:reply, {:ok, opened},
                  %{state | transport: transport, agent_session_id: agent_session_id}}
@@ -104,9 +108,12 @@ defmodule Prehen.Agents.Wrappers.Passthrough do
 
   def handle_call({:send_message, attrs}, _from, %{transport: transport} = state)
       when is_pid(transport) do
-    {:reply, Stdio.send_message(transport, attach_agent_session_id(attrs, state)), state}
-  catch
-    :exit, reason -> {:reply, {:error, reason}, %{state | transport: nil}}
+    case safe_transport_call(state, fn ->
+           Stdio.send_message(transport, attach_agent_session_id(attrs, state))
+         end) do
+      {:ok, reply, next_state} -> {:reply, reply, next_state}
+      {:error, reply, next_state} -> {:reply, reply, next_state}
+    end
   end
 
   def handle_call({:send_message, _attrs}, _from, state) do
@@ -115,9 +122,12 @@ defmodule Prehen.Agents.Wrappers.Passthrough do
 
   def handle_call({:send_control, attrs}, _from, %{transport: transport} = state)
       when is_pid(transport) do
-    {:reply, Stdio.send_control(transport, attach_agent_session_id(attrs, state)), state}
-  catch
-    :exit, reason -> {:reply, {:error, reason}, %{state | transport: nil}}
+    case safe_transport_call(state, fn ->
+           Stdio.send_control(transport, attach_agent_session_id(attrs, state))
+         end) do
+      {:ok, reply, next_state} -> {:reply, reply, next_state}
+      {:error, reply, next_state} -> {:reply, reply, next_state}
+    end
   end
 
   def handle_call({:send_control, _attrs}, _from, state) do
@@ -126,9 +136,12 @@ defmodule Prehen.Agents.Wrappers.Passthrough do
 
   def handle_call({:recv_event, timeout}, _from, %{transport: transport} = state)
       when is_pid(transport) do
-    {:reply, Stdio.recv_frame(transport, timeout), state}
-  catch
-    :exit, reason -> {:reply, {:error, reason}, %{state | transport: nil}}
+    case safe_transport_call(state, fn ->
+           Stdio.recv_frame(transport, timeout)
+         end) do
+      {:ok, reply, next_state} -> {:reply, reply, next_state}
+      {:error, reply, next_state} -> {:reply, reply, next_state}
+    end
   end
 
   def handle_call({:recv_event, _timeout}, _from, state) do
@@ -185,4 +198,14 @@ defmodule Prehen.Agents.Wrappers.Passthrough do
   end
 
   defp maybe_stop_transport(_transport), do: :ok
+
+  defp safe_transport_call(state, fun) do
+    {:ok, fun.(), state}
+  catch
+    :exit, {:timeout, {GenServer, :call, _call}} ->
+      {:error, {:error, :timeout}, state}
+
+    :exit, reason ->
+      {:error, {:error, reason}, %{state | transport: nil, agent_session_id: nil}}
+  end
 end

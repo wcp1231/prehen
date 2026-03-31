@@ -26,11 +26,23 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
   test "control plane HTTP endpoints route through gateway sessions" do
     conn = build_conn()
 
-    conn = post(conn, "/sessions", %{"agent" => "coder"})
+    conn =
+      post(conn, "/sessions", %{
+        "agent" => "coder",
+        "provider" => "anthropic",
+        "model" => "claude-sonnet"
+      })
+
     assert created = json_response(conn, 201)
     assert %{"session_id" => session_id, "agent" => "coder"} = created
 
     on_exit(fn -> Surface.stop_session(session_id) end)
+
+    conn = get(build_conn(), "/sessions/#{session_id}")
+    assert %{"session" => session} = json_response(conn, 200)
+    assert session["agent_name"] == "coder"
+    assert session["provider"] == "anthropic"
+    assert session["model"] == "claude-sonnet"
 
     conn = post(build_conn(), "/sessions/#{session_id}/messages", %{"text" => "hello from http"})
     assert submitted = json_response(conn, 202)
@@ -173,9 +185,9 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
     %{
       name: "fake_stdio_impl",
       command: "mix",
-      args: ["run", "--no-start", "test/support/fake_stdio_agent.exs"],
+      args: ["run", "--no-start", "test/support/fake_wrapper_agent.exs"],
       env: %{},
-      wrapper: Prehen.Agents.Wrappers.PiCodingAgent
+      wrapper: Prehen.Agents.Wrappers.Passthrough
     }
   end
 

@@ -3,7 +3,7 @@ defmodule PrehenWeb.SessionController do
 
   alias Prehen.Client.Surface
 
-  action_fallback PrehenWeb.FallbackController
+  action_fallback(PrehenWeb.FallbackController)
 
   def create(conn, params) do
     opts = build_session_opts(params)
@@ -45,15 +45,11 @@ defmodule PrehenWeb.SessionController do
   end
 
   defp build_session_opts(params) do
-    opts = []
-
-    opts =
-      case Map.get(params, "agent") do
-        nil -> opts
-        agent -> Keyword.put(opts, :agent, agent)
-      end
-
-    opts
+    []
+    |> put_optional(params, "agent", :agent)
+    |> put_optional(params, "provider", :provider)
+    |> put_optional(params, "model", :model)
+    |> put_optional(params, "workspace", :workspace)
   end
 
   defp normalize_message_text(text) when is_binary(text) do
@@ -64,4 +60,11 @@ defmodule PrehenWeb.SessionController do
   end
 
   defp normalize_message_text(_), do: {:error, :bad_request}
+
+  defp put_optional(opts, params, key, opt_key) do
+    case Map.get(params, key) do
+      nil -> opts
+      value -> Keyword.put(opts, opt_key, value)
+    end
+  end
 end

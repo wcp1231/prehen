@@ -1,28 +1,127 @@
 defmodule Prehen.Client.SurfaceTest do
   use ExUnit.Case, async: false
 
-  defmodule CorrelatingTransport do
+  defmodule InspectingWrapper do
     use GenServer
 
-    alias Prehen.Agents.Transport
+    alias Prehen.Agents.Wrapper
+    alias Prehen.Agents.Wrappers.Passthrough
 
+    @behaviour Wrapper
+
+    @impl Wrapper
     def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
-    def open_session(transport, _attrs), do: GenServer.call(transport, :open_session)
-    def send_message(transport, attrs), do: GenServer.call(transport, {:send_message, attrs})
-    def recv_frame(transport, timeout), do: Transport.recv_frame(transport, timeout)
-    def send_control(_transport, _attrs), do: :ok
-    def stop(transport), do: GenServer.stop(transport)
+    @impl Wrapper
+    def open_session(wrapper, attrs), do: GenServer.call(wrapper, {:open_session, attrs}, 16_000)
+
+    @impl Wrapper
+    def send_message(wrapper, attrs), do: GenServer.call(wrapper, {:send_message, attrs})
+
+    @impl Wrapper
+    def send_control(wrapper, attrs), do: GenServer.call(wrapper, {:send_control, attrs})
+
+    @impl Wrapper
+    def recv_event(wrapper, timeout),
+      do: GenServer.call(wrapper, {:recv_event, timeout}, timeout + 100)
+
+    @impl Wrapper
+    def support_check(session_config), do: Passthrough.support_check(session_config)
+
+    @impl Wrapper
+    def stop(wrapper), do: GenServer.stop(wrapper)
 
     @impl true
     def init(opts) do
-      gateway_session_id = Keyword.fetch!(opts, :gateway_session_id)
-      {:ok, %{gateway_session_id: gateway_session_id, queue: :queue.new(), recv_from: nil}}
+      session_config = Keyword.fetch!(opts, :session_config)
+      test_pid = Keyword.get(opts, :test_pid)
+
+      {:ok, delegate} = Passthrough.start_link(session_config: session_config)
+
+      {:ok, %{delegate: delegate, session_config: session_config, test_pid: test_pid}}
     end
 
     @impl true
-    def handle_call(:open_session, _from, state) do
-      {:reply, {:ok, %{agent_session_id: "agent_#{state.gateway_session_id}"}}, state}
+    def handle_call({:open_session, attrs}, _from, state) do
+      result = Passthrough.open_session(state.delegate, attrs)
+
+      if match?({:ok, _opened}, result) and is_pid(state.test_pid) do
+        send(state.test_pid, {:wrapper_opened, opened_payload(state.session_config, attrs)})
+      end
+
+      {:reply, result, state}
+    end
+
+    def handle_call({:send_message, attrs}, _from, state) do
+      {:reply, Passthrough.send_message(state.delegate, attrs), state}
+    end
+
+    def handle_call({:send_control, attrs}, _from, state) do
+      {:reply, Passthrough.send_control(state.delegate, attrs), state}
+    end
+
+    def handle_call({:recv_event, timeout}, _from, state) do
+      {:reply, Passthrough.recv_event(state.delegate, timeout), state}
+    end
+
+    @impl true
+    def terminate(_reason, state) do
+      :ok = Passthrough.stop(state.delegate)
+      :ok
+    end
+
+    defp opened_payload(session_config, attrs) do
+      %{
+        profile_name: session_config.profile_name,
+        provider: session_config.provider,
+        model: session_config.model,
+        workspace:
+          Map.get(attrs, :workspace) || Map.get(attrs, "workspace") || session_config.workspace,
+        prompt_profile: session_config.prompt_profile
+      }
+    end
+  end
+
+  defmodule CorrelatingWrapper do
+    use GenServer
+
+    alias Prehen.Agents.Wrapper
+
+    @behaviour Wrapper
+
+    @impl Wrapper
+    def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+    @impl Wrapper
+    def open_session(wrapper, attrs), do: GenServer.call(wrapper, {:open_session, attrs})
+
+    @impl Wrapper
+    def send_message(wrapper, attrs), do: GenServer.call(wrapper, {:send_message, attrs})
+
+    @impl Wrapper
+    def send_control(_wrapper, _attrs), do: :ok
+
+    @impl Wrapper
+    def recv_event(wrapper, timeout),
+      do: GenServer.call(wrapper, {:recv_event, timeout}, timeout + 100)
+
+    @impl Wrapper
+    def support_check(_session_config), do: :ok
+
+    @impl Wrapper
+    def stop(wrapper), do: GenServer.stop(wrapper)
+
+    @impl true
+    def init(_opts) do
+      {:ok, %{gateway_session_id: nil, queue: :queue.new(), recv_from: nil}}
+    end
+
+    @impl true
+    def handle_call({:open_session, attrs}, _from, state) do
+      gateway_session_id = Map.fetch!(attrs, :gateway_session_id)
+
+      {:reply, {:ok, %{agent_session_id: "agent_#{gateway_session_id}"}},
+       %{state | gateway_session_id: gateway_session_id}}
     end
 
     def handle_call({:send_message, attrs}, _from, state) do
@@ -50,7 +149,7 @@ defmodule Prehen.Client.SurfaceTest do
       {:reply, :ok, enqueue(enqueue(state, noise), matched)}
     end
 
-    def handle_call({:recv_frame, _timeout}, from, state) do
+    def handle_call({:recv_event, _timeout}, from, state) do
       case :queue.out(state.queue) do
         {{:value, frame}, rest} ->
           {:reply, {:ok, frame}, %{state | queue: rest}}
@@ -68,6 +167,7 @@ defmodule Prehen.Client.SurfaceTest do
     defp enqueue(state, frame), do: %{state | queue: :queue.in(frame, state.queue)}
   end
 
+  alias Prehen.Agents.Implementation
   alias Prehen.Agents.Profile
   alias Prehen.Agents.Registry
   alias Prehen.Client.Surface
@@ -80,21 +180,71 @@ defmodule Prehen.Client.SurfaceTest do
 
     fake_profile = %Profile{
       name: "fake_stdio",
-      command: ["mix", "run", "--no-start", "test/support/fake_stdio_agent.exs"]
+      label: "Fake stdio",
+      implementation: "fake_stdio_impl",
+      default_provider: "openai",
+      default_model: "gpt-5",
+      prompt_profile: "fake_default",
+      workspace_policy: %{mode: "scoped"}
+    }
+
+    wrapper_profile = %Profile{
+      name: "coder",
+      label: "Coder",
+      implementation: "coder_impl",
+      default_provider: "openai",
+      default_model: "gpt-5",
+      prompt_profile: "coder_default",
+      workspace_policy: %{mode: "scoped"}
     }
 
     correlated_profile = %Profile{
       name: "correlated_agent",
-      command: ["noop"],
-      transport: CorrelatingTransport
+      label: "Correlated Agent",
+      implementation: "correlated_impl",
+      default_provider: "openai",
+      default_model: "gpt-5",
+      prompt_profile: "correlated_default",
+      workspace_policy: %{mode: "scoped"}
+    }
+
+    fake_stdio_impl = %Implementation{
+      name: "fake_stdio_impl",
+      command: "mix",
+      args: ["run", "--no-start", "test/support/fake_wrapper_agent.exs"],
+      env: %{},
+      wrapper: Prehen.Agents.Wrappers.Passthrough
+    }
+
+    wrapper_impl = %Implementation{
+      name: "coder_impl",
+      command: "mix",
+      args: ["run", "--no-start", "test/support/fake_wrapper_agent.exs"],
+      env: %{},
+      wrapper: InspectingWrapper
+    }
+
+    correlated_impl = %Implementation{
+      name: "correlated_impl",
+      command: "noop",
+      args: [],
+      env: %{},
+      wrapper: CorrelatingWrapper
     }
 
     :sys.replace_state(registry_pid, fn _state ->
       %{
-        ordered: [fake_profile, correlated_profile],
+        ordered: [fake_profile, wrapper_profile, correlated_profile],
         by_name: %{
           "fake_stdio" => fake_profile,
+          "coder" => wrapper_profile,
           "correlated_agent" => correlated_profile
+        },
+        implementations_ordered: [fake_stdio_impl, wrapper_impl, correlated_impl],
+        implementations_by_name: %{
+          "fake_stdio_impl" => fake_stdio_impl,
+          "coder_impl" => wrapper_impl,
+          "correlated_impl" => correlated_impl
         }
       }
     end)
@@ -120,6 +270,29 @@ defmodule Prehen.Client.SurfaceTest do
     assert {:ok, %{status: :attached}} = SessionRegistry.fetch(gateway_session_id)
 
     assert :ok = Surface.stop_session(gateway_session_id)
+  end
+
+  test "create_session resolves provider model prompt and workspace before wrapper startup" do
+    assert {:ok, %{session_id: session_id, agent: "coder"}} =
+             Surface.create_session(
+               agent: "coder",
+               provider: "anthropic",
+               model: "claude-sonnet",
+               workspace: "/tmp/prehen_surface_workspace",
+               test_pid: self()
+             )
+
+    assert_receive {:wrapper_opened,
+                    %{
+                      profile_name: "coder",
+                      provider: "anthropic",
+                      model: "claude-sonnet",
+                      workspace: "/tmp/prehen_surface_workspace",
+                      prompt_profile: "coder_default"
+                    }}
+
+    assert is_binary(session_id)
+    assert :ok = Surface.stop_session(session_id)
   end
 
   test "submit_message and session_status use gateway session ids" do
@@ -155,7 +328,8 @@ defmodule Prehen.Client.SurfaceTest do
 
     assert {:ok, %{session_id: crashed_session_id}} = Surface.create_session(agent: "fake_stdio")
     assert {:ok, worker_pid} = SessionRegistry.fetch_worker(crashed_session_id)
-    transport_pid = :sys.get_state(worker_pid).transport
+    wrapper_pid = :sys.get_state(worker_pid).wrapper
+    transport_pid = :sys.get_state(wrapper_pid).transport
     monitor_ref = Process.monitor(worker_pid)
 
     Process.exit(transport_pid, :kill)

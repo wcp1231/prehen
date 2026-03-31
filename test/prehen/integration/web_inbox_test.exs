@@ -61,7 +61,12 @@ defmodule Prehen.Integration.WebInboxTest do
   end
 
   test "supports create detail history and stop through inbox JSON endpoints" do
-    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "coder"})
+    conn =
+      post(build_conn(), "/inbox/sessions", %{
+        "agent" => "coder",
+        "provider" => "anthropic",
+        "model" => "claude-sonnet"
+      })
 
     assert %{"session_id" => session_id, "agent" => "coder", "status" => "attached"} =
              json_response(conn, 201)
@@ -93,6 +98,11 @@ defmodule Prehen.Integration.WebInboxTest do
     assert session["session_id"] == session_id
     assert session["agent_name"] == "coder"
     assert session["status"] in ["idle", "running", "attached"]
+
+    conn = get(build_conn(), "/sessions/#{session_id}")
+    assert %{"session" => gateway_session} = json_response(conn, 200)
+    assert gateway_session["provider"] == "anthropic"
+    assert gateway_session["model"] == "claude-sonnet"
 
     conn = delete(build_conn(), "/inbox/sessions/#{session_id}")
     assert response(conn, 204) == ""
@@ -263,9 +273,9 @@ defmodule Prehen.Integration.WebInboxTest do
     %{
       name: name,
       command: "mix",
-      args: ["run", "--no-start", "test/support/fake_stdio_agent.exs"],
+      args: ["run", "--no-start", "test/support/fake_wrapper_agent.exs"],
       env: %{},
-      wrapper: Prehen.Agents.Wrappers.PiCodingAgent
+      wrapper: Prehen.Agents.Wrappers.Passthrough
     }
   end
 

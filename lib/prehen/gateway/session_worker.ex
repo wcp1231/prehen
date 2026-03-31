@@ -4,20 +4,29 @@ defmodule Prehen.Gateway.SessionWorker do
   use GenServer
 
   alias Prehen.Agents.Envelope
-  alias Prehen.Agents.Profile
-  alias Prehen.Gateway.Router
+  alias Prehen.Agents.PromptContext
+  alias Prehen.Agents.SessionConfig
   alias Prehen.Gateway.InboxProjection
   alias Prehen.Gateway.SessionRegistry
   alias Prehen.Observability.TraceCollector
 
-  def start_session(%Profile{} = profile, opts \\ []) do
+  @recv_poll_timeout_ms 100
+
+  def start_session(%SessionConfig{} = session_config, opts \\ []) do
     gateway_session_id = Keyword.get(opts, :gateway_session_id, gen_gateway_session_id())
+
+    :ok =
+      SessionRegistry.put(
+        route_state(session_config, gateway_session_id, %{
+          worker_pid: nil,
+          status: :starting
+        })
+      )
 
     child_opts = [
       gateway_session_id: gateway_session_id,
-      agent_name: profile.name,
-      test_pid: Keyword.get(opts, :test_pid),
-      workspace: Keyword.get(opts, :workspace)
+      session_config: session_config,
+      test_pid: Keyword.get(opts, :test_pid)
     ]
 
     case DynamicSupervisor.start_child(
@@ -32,6 +41,14 @@ defmodule Prehen.Gateway.SessionWorker do
          }}
 
       {:error, reason} ->
+        :ok =
+          SessionRegistry.put(
+            route_state(session_config, gateway_session_id, %{
+              worker_pid: nil,
+              status: :crashed
+            })
+          )
+
         {:error, reason}
     end
   end
@@ -49,67 +66,70 @@ defmodule Prehen.Gateway.SessionWorker do
     Process.flag(:trap_exit, true)
 
     gateway_session_id = Keyword.fetch!(opts, :gateway_session_id)
-    requested_agent_name = Keyword.get(opts, :agent_name)
+    session_config = Keyword.fetch!(opts, :session_config)
     test_pid = Keyword.get(opts, :test_pid)
-    workspace = Keyword.get(opts, :workspace)
     now_ms = System.system_time(:millisecond)
 
-    with {:ok, profile} <- Router.route(agent_name: requested_agent_name),
-         {:ok, transport_module} <- transport_module(profile) do
-      case transport_module.start_link(profile: profile, gateway_session_id: gateway_session_id) do
-        {:ok, transport} ->
-          case transport_module.open_session(transport, %{workspace: workspace}) do
-            {:ok, %{agent_session_id: agent_session_id}} ->
-              case SessionRegistry.put(%{
-                     gateway_session_id: gateway_session_id,
+    with {:ok, wrapper_module} <- wrapper_module(session_config),
+         {:ok, wrapper} <-
+           wrapper_module.start_link(session_config: session_config, test_pid: test_pid) do
+      case wrapper_module.open_session(
+             wrapper,
+             open_session_attrs(session_config, gateway_session_id)
+           ) do
+        {:ok, opened} ->
+          with {:ok, agent_session_id} <- fetch_agent_session_id(opened),
+               :ok <-
+                 SessionRegistry.put(
+                   route_state(session_config, gateway_session_id, %{
                      worker_pid: self(),
-                     agent_name: profile.name,
                      agent_session_id: agent_session_id,
                      status: :attached
-                   }) do
-                :ok ->
-                  :ok =
-                    InboxProjection.session_started(%{
-                      session_id: gateway_session_id,
-                      agent_name: profile.name,
-                      created_at: now_ms
-                    })
+                   })
+                 ) do
+            :ok =
+              InboxProjection.session_started(%{
+                session_id: gateway_session_id,
+                agent_name: session_config.profile_name,
+                created_at: now_ms
+              })
 
-                  TraceCollector.record_sync(%{
-                    type: "agent.started",
-                    session_id: gateway_session_id,
-                    gateway_session_id: gateway_session_id,
-                    agent: profile.name,
-                    agent_session_id: agent_session_id
-                  })
+            TraceCollector.record_sync(%{
+              type: "agent.started",
+              session_id: gateway_session_id,
+              gateway_session_id: gateway_session_id,
+              agent: session_config.profile_name,
+              agent_session_id: agent_session_id
+            })
 
-                  owner = self()
-                  receiver = spawn_link(fn -> recv_loop(owner, transport_module, transport) end)
+            owner = self()
+            receiver = spawn_link(fn -> recv_loop(owner, wrapper_module, wrapper) end)
 
-                  {:ok,
-                   %{
-                     gateway_session_id: gateway_session_id,
-                     agent_name: profile.name,
-                     agent_session_id: agent_session_id,
-                     transport_module: transport_module,
-                     transport: transport,
-                     receiver: receiver,
-                     test_pid: test_pid,
-                     seq: 0
-                   }}
-
-                {:error, reason} ->
-                  safe_stop_transport(transport_module, transport)
-                  {:stop, reason}
-              end
-
+            {:ok,
+             %{
+               gateway_session_id: gateway_session_id,
+               agent_name: session_config.profile_name,
+               agent_session_id: agent_session_id,
+               wrapper_module: wrapper_module,
+               wrapper: wrapper,
+               receiver: receiver,
+               test_pid: test_pid,
+               seq: 0,
+               session_config: session_config
+             }}
+          else
             {:error, reason} ->
-              safe_stop_transport(transport_module, transport)
+              safe_stop_wrapper(wrapper_module, wrapper)
               {:stop, reason}
           end
 
         {:error, reason} ->
+          safe_stop_wrapper(wrapper_module, wrapper)
           {:stop, reason}
+
+        other ->
+          safe_stop_wrapper(wrapper_module, wrapper)
+          {:stop, other}
       end
     else
       {:error, reason} -> {:stop, reason}
@@ -120,7 +140,7 @@ defmodule Prehen.Gateway.SessionWorker do
   def handle_call({:submit_message, attrs}, _from, state) do
     message = Map.put(attrs, :agent_session_id, state.agent_session_id)
 
-    case state.transport_module.send_message(state.transport, message) do
+    case state.wrapper_module.send_message(state.wrapper, message) do
       :ok ->
         :ok =
           SessionRegistry.put(%{
@@ -138,7 +158,7 @@ defmodule Prehen.Gateway.SessionWorker do
   end
 
   @impl true
-  def handle_info({:transport_frame, frame}, state) when is_map(frame) do
+  def handle_info({:wrapper_event, frame}, state) when is_map(frame) do
     type = frame_value(frame, "type")
     payload = frame_value(frame, "payload") || %{}
 
@@ -153,20 +173,20 @@ defmodule Prehen.Gateway.SessionWorker do
       })
 
     dispatch_event(state, event)
-    project_transport_frame(state.gateway_session_id, type, payload)
+    project_wrapper_frame(state.gateway_session_id, type, payload)
     {:noreply, %{state | seq: state.seq + 1}}
   end
 
-  def handle_info({:transport_error, reason}, state) do
-    {:stop, {:transport_error, reason}, state}
+  def handle_info({:wrapper_error, reason}, state) do
+    {:stop, {:wrapper_error, reason}, state}
   end
 
-  def handle_info({:EXIT, transport, reason}, %{transport: transport} = state) do
+  def handle_info({:EXIT, wrapper, reason}, %{wrapper: wrapper} = state) do
     case reason do
       :normal -> {:stop, :normal, state}
       :shutdown -> {:stop, :shutdown, state}
       {:shutdown, _} = shutdown -> {:stop, shutdown, state}
-      _ -> {:stop, {:transport_exit, reason}, state}
+      _ -> {:stop, {:wrapper_exit, reason}, state}
     end
   end
 
@@ -198,7 +218,7 @@ defmodule Prehen.Gateway.SessionWorker do
         worker_pid: nil
       })
 
-    safe_stop_transport(state.transport_module, state.transport)
+    safe_stop_wrapper(state.wrapper_module, state.wrapper)
 
     :ok
   end
@@ -217,28 +237,37 @@ defmodule Prehen.Gateway.SessionWorker do
     )
   end
 
-  defp recv_loop(owner, transport_module, transport) do
-    case transport_module.recv_frame(transport, 30_000) do
-      {:ok, frame} ->
-        send(owner, {:transport_frame, frame})
-        recv_loop(owner, transport_module, transport)
+  defp recv_loop(owner, wrapper_module, wrapper) do
+    case wrapper_module.recv_event(wrapper, @recv_poll_timeout_ms) do
+      {:ok, event} ->
+        send(owner, {:wrapper_event, event})
+        recv_loop(owner, wrapper_module, wrapper)
+
+      {:error, :timeout} ->
+        recv_loop(owner, wrapper_module, wrapper)
 
       {:error, reason} ->
-        send(owner, {:transport_error, reason})
+        send(owner, {:wrapper_error, reason})
     end
   catch
     :exit, reason ->
-      send(owner, {:transport_error, reason})
+      send(owner, {:wrapper_error, reason})
   end
 
-  defp transport_module(%Profile{transport: :stdio}), do: {:ok, Prehen.Agents.Transports.Stdio}
-  defp transport_module(%Profile{transport: module}) when is_atom(module), do: {:ok, module}
-  defp transport_module(_profile), do: {:error, :unsupported_transport}
+  defp wrapper_module(%SessionConfig{implementation: implementation})
+       when is_map(implementation) do
+    case Map.get(implementation, :wrapper) || Map.get(implementation, "wrapper") do
+      module when is_atom(module) -> {:ok, module}
+      _ -> {:error, :unsupported_wrapper}
+    end
+  end
 
-  defp safe_stop_transport(transport_module, transport)
-       when is_atom(transport_module) and is_pid(transport) do
+  defp wrapper_module(_session_config), do: {:error, :unsupported_wrapper}
+
+  defp safe_stop_wrapper(wrapper_module, wrapper)
+       when is_atom(wrapper_module) and is_pid(wrapper) do
     try do
-      transport_module.stop(transport)
+      wrapper_module.stop(wrapper)
       :ok
     rescue
       _error -> :ok
@@ -247,10 +276,9 @@ defmodule Prehen.Gateway.SessionWorker do
     end
   end
 
-  defp safe_stop_transport(_transport_module, _transport), do: :ok
+  defp safe_stop_wrapper(_wrapper_module, _wrapper), do: :ok
 
-  defp project_transport_frame(session_id, "session.output.delta", payload)
-       when is_map(payload) do
+  defp project_wrapper_frame(session_id, "session.output.delta", payload) when is_map(payload) do
     with {:ok, message_id} <- fetch_optional_binary(payload, "message_id"),
          {:ok, text} <- fetch_optional_binary(payload, "text") do
       InboxProjection.agent_delta(%{
@@ -263,7 +291,7 @@ defmodule Prehen.Gateway.SessionWorker do
     end
   end
 
-  defp project_transport_frame(session_id, "session.output.completed", payload)
+  defp project_wrapper_frame(session_id, "session.output.completed", payload)
        when is_map(payload) do
     with {:ok, message_id} <- fetch_optional_binary(payload, "message_id") do
       :ok =
@@ -281,12 +309,10 @@ defmodule Prehen.Gateway.SessionWorker do
     end
   end
 
-  defp project_transport_frame(_session_id, _type, _payload), do: :ok
+  defp project_wrapper_frame(_session_id, _type, _payload), do: :ok
 
   defp frame_value(map, key) when is_binary(key) do
-    atom_key = String.to_existing_atom(key)
-
-    Map.get(map, key) || Map.get(map, atom_key)
+    Map.get(map, key) || Map.get(map, existing_atom(key))
   end
 
   defp extract_user_text(parts) when is_list(parts) do
@@ -318,12 +344,73 @@ defmodule Prehen.Gateway.SessionWorker do
   defp maybe_project_user_message(_session_id, _message), do: :ok
 
   defp fetch_optional_binary(map, key) when is_map(map) do
-    case Map.get(map, key) || Map.get(map, String.to_existing_atom(key)) do
+    case Map.get(map, key) || Map.get(map, existing_atom(key)) do
       value when is_binary(value) and value != "" -> {:ok, value}
       _ -> :error
     end
   rescue
     ArgumentError -> :error
+  end
+
+  defp existing_atom(key) when is_binary(key) do
+    String.to_existing_atom(key)
+  rescue
+    ArgumentError -> nil
+  end
+
+  defp fetch_agent_session_id(%{agent_session_id: agent_session_id})
+       when is_binary(agent_session_id) and agent_session_id != "" do
+    {:ok, agent_session_id}
+  end
+
+  defp fetch_agent_session_id(%{"agent_session_id" => agent_session_id})
+       when is_binary(agent_session_id) and agent_session_id != "" do
+    {:ok, agent_session_id}
+  end
+
+  defp fetch_agent_session_id(%{payload: payload}) when is_map(payload),
+    do: fetch_agent_session_id(payload)
+
+  defp fetch_agent_session_id(%{"payload" => payload}) when is_map(payload),
+    do: fetch_agent_session_id(payload)
+
+  defp fetch_agent_session_id(_opened), do: {:error, :missing_agent_session_id}
+
+  defp open_session_attrs(%SessionConfig{} = session_config, gateway_session_id) do
+    %{
+      gateway_session_id: gateway_session_id,
+      agent: session_config.profile_name,
+      profile_name: session_config.profile_name,
+      provider: session_config.provider,
+      model: session_config.model,
+      prompt_profile: session_config.prompt_profile,
+      workspace: session_config.workspace,
+      prompt: prompt_context(session_config)
+    }
+  end
+
+  defp prompt_context(%SessionConfig{} = session_config) do
+    workspace =
+      case session_config.workspace do
+        workspace when is_binary(workspace) and workspace != "" -> %{root_dir: workspace}
+        _ -> %{}
+      end
+
+    PromptContext.build(session_config, workspace: workspace)
+  end
+
+  defp route_state(%SessionConfig{} = session_config, gateway_session_id, attrs) do
+    Map.merge(
+      %{
+        gateway_session_id: gateway_session_id,
+        agent_name: session_config.profile_name,
+        provider: session_config.provider,
+        model: session_config.model,
+        prompt_profile: session_config.prompt_profile,
+        workspace: session_config.workspace
+      },
+      attrs
+    )
   end
 
   defp terminal_status(reason) do

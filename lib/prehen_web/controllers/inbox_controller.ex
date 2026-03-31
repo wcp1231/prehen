@@ -42,9 +42,17 @@ defmodule PrehenWeb.InboxController do
   end
 
   defp build_session_opts(params) do
-    case Map.get(params, "agent") do
-      nil -> []
-      agent -> [agent: agent]
+    []
+    |> put_optional(params, "agent", :agent)
+    |> put_optional(params, "provider", :provider)
+    |> put_optional(params, "model", :model)
+    |> put_optional(params, "workspace", :workspace)
+  end
+
+  defp put_optional(opts, params, key, opt_key) do
+    case Map.get(params, key) do
+      nil -> opts
+      value -> Keyword.put(opts, opt_key, value)
     end
   end
 end
