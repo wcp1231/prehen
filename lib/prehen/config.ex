@@ -6,6 +6,7 @@ defmodule Prehen.Config do
   alias Prehen.Agents.SessionConfig
 
   @default_timeout_ms 15_000
+  @default_pi_coding_agent_command "pi-coding-agent"
 
   @spec load(keyword()) :: map()
   def load(overrides \\ []) do
@@ -34,6 +35,11 @@ defmodule Prehen.Config do
       implementation: implementation,
       workspace: normalize_optional_string(Keyword.get(opts, :workspace))
     }
+  end
+
+  def pi_coding_agent_command do
+    normalize_optional_string(System.get_env("PI_CODING_AGENT_BIN")) ||
+      @default_pi_coding_agent_command
   end
 
   defp int_config(overrides, key, env_var, default) do

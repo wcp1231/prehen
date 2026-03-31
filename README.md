@@ -62,10 +62,45 @@ prehen run --agent NAME "<task>" [--workspace PATH] [--session-id ID] [--timeout
 The gateway now only reads a small runtime config surface:
 
 - `:prehen, :agent_profiles` application env for boot-time local agent profiles
+- `:prehen, :agent_implementations` application env for wrapper-backed local executables
 - `PREHEN_TIMEOUT_MS` or `timeout_ms:` override for one-shot run timeouts
 - `PREHEN_TRACE_JSON` or `trace_json:` override for CLI trace output
 
 There is no longer a built-in structured config loader for providers, secrets, runtime templates, or workspace layout.
+
+Example profile + implementation wiring for `pi-coding-agent`:
+
+```elixir
+config :prehen,
+  agent_profiles: [
+    %{
+      name: "coder",
+      label: "Coder",
+      implementation: "pi_coding_agent",
+      default_provider: "openai",
+      default_model: "gpt-5",
+      prompt_profile: "coder_default",
+      workspace_policy: %{mode: "scoped"}
+    }
+  ],
+  agent_implementations: [
+    %{
+      name: "pi_coding_agent",
+      command: System.get_env("PI_CODING_AGENT_BIN") || "pi-coding-agent",
+      args: [],
+      env: %{},
+      wrapper: Prehen.Agents.Wrappers.PiCodingAgent
+    }
+  ]
+```
+
+The wrapper owns `cwd`, prompt payload, provider, model, and workspace env injection before the executable is opened.
+Set `PI_CODING_AGENT_BIN` only when you want the focused wrapper validation test to hit a concrete local executable:
+the opt-in test expects that executable to emit a JSON validation report in its first output delta so the injected contract can be asserted end to end.
+
+```bash
+PI_CODING_AGENT_BIN=/abs/path/to/pi-coding-agent mix test test/prehen/agents/wrappers/pi_coding_agent_test.exs
+```
 
 ## Gateway Surface
 
