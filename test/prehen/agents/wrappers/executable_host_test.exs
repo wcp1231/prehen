@@ -25,4 +25,20 @@ defmodule Prehen.Agents.Wrappers.ExecutableHostTest do
     assert {:stderr, "err"} in events
     assert_receive {:executable_host, ^host, {:exit_status, 0}}, 1_000
   end
+
+  test "forwards stdin to the child after relay bootstrap" do
+    assert {:ok, host} =
+             ExecutableHost.start_link(
+               owner: self(),
+               command: "python3",
+               args: [
+                 "-c",
+                 "import sys; sys.stdout.write(sys.stdin.readline()); sys.stdout.flush()"
+               ]
+             )
+
+    assert :ok = ExecutableHost.write(host, "hello from host\n")
+    assert_receive {:executable_host, ^host, {:stdout, "hello from host\n"}}, 1_000
+    assert_receive {:executable_host, ^host, {:exit_status, 0}}, 1_000
+  end
 end

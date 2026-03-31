@@ -46,8 +46,15 @@ defmodule Prehen.Agents.Wrappers.ExecutableHost do
     with {:ok, executable} <- resolve_command(command),
          {:ok, relay_executable} <- resolve_command("python3"),
          :ok <- ensure_relay_script(),
-         {:ok, port} <- open_port(relay_executable, relay_args(executable, args, env), %{}) do
+         {:ok, port} <- open_port(relay_executable, relay_args(), %{}),
+         :ok <- write_bootstrap(port, executable, args, env) do
       {:ok, %{owner: owner, port: port, buffer: "", exit_reported?: false}}
+    else
+      {:bootstrap_error, reason} ->
+        {:stop, reason}
+
+      other ->
+        other
     end
   end
 
@@ -138,14 +145,7 @@ defmodule Prehen.Agents.Wrappers.ExecutableHost do
 
   defp normalize_env(_env), do: []
 
-  defp relay_args(command, args, env) do
-    payload =
-      %{command: command, args: Enum.map(args, &to_string/1), env: normalize_env_map(env)}
-      |> Jason.encode!()
-      |> Base.url_encode64(padding: false)
-
-    [relay_script_path(), payload]
-  end
+  defp relay_args, do: [relay_script_path()]
 
   defp normalize_env_map(env) when is_map(env) do
     Map.new(env, fn {key, value} -> {to_string(key), to_string(value)} end)
@@ -186,6 +186,30 @@ defmodule Prehen.Agents.Wrappers.ExecutableHost do
   defp ensure_relay_script do
     if File.regular?(relay_script_path()), do: :ok, else: :error
   end
+
+  defp write_bootstrap(port, command, args, env) do
+    payload =
+      %{type: "bootstrap", config: bootstrap_config(command, args, env)}
+      |> Jason.encode_to_iodata!()
+
+    case Port.command(port, encode_frame(payload)) do
+      true -> :ok
+      false -> {:bootstrap_error, :port_closed}
+    end
+  rescue
+    error -> {:bootstrap_error, error}
+  end
+
+  defp bootstrap_config(command, args, env) do
+    %{
+      command: command,
+      args: Enum.map(args, &to_string/1),
+      env: normalize_env_map(env)
+    }
+  end
+
+  defp encode_frame(payload) when is_binary(payload), do: [<<byte_size(payload)::32>>, payload]
+  defp encode_frame(payload), do: encode_frame(IO.iodata_to_binary(payload))
 
   defp decode_event(payload) do
     case Jason.decode!(payload) do

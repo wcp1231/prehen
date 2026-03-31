@@ -13,12 +13,6 @@ PROCESS = None
 CHUNK_SIZE = 4096
 
 
-def decode_config(encoded):
-    padding = "=" * (-len(encoded) % 4)
-    payload = base64.urlsafe_b64decode(encoded + padding)
-    return json.loads(payload.decode("utf-8"))
-
-
 def emit(event):
     payload = json.dumps(event, separators=(",", ":")).encode("utf-8")
 
@@ -41,13 +35,45 @@ def terminate_child(_signum, _frame):
     raise SystemExit(0)
 
 
+def read_exact(fd, size):
+    chunks = []
+    remaining = size
+
+    while remaining > 0:
+        chunk = os.read(fd, remaining)
+        if not chunk:
+            return None
+        chunks.append(chunk)
+        remaining -= len(chunk)
+
+    return b"".join(chunks)
+
+
+def read_bootstrap(fd):
+    header = read_exact(fd, 4)
+    if header is None:
+        raise SystemExit(1)
+
+    length = struct.unpack(">I", header)[0]
+    payload = read_exact(fd, length)
+    if payload is None:
+        raise SystemExit(1)
+
+    message = json.loads(payload.decode("utf-8"))
+    if message.get("type") != "bootstrap":
+        raise SystemExit(1)
+
+    return message["config"]
+
+
 def main():
     global PROCESS
 
     signal.signal(signal.SIGTERM, terminate_child)
     signal.signal(signal.SIGINT, terminate_child)
 
-    config = decode_config(sys.argv[1])
+    stdin_fd = sys.stdin.fileno()
+    config = read_bootstrap(stdin_fd)
 
     env = {key: str(value) for key, value in config.get("env", {}).items()}
     child_env = os.environ.copy()
@@ -67,7 +93,7 @@ def main():
         return
 
     selector = selectors.DefaultSelector()
-    selector.register(sys.stdin.buffer, selectors.EVENT_READ, "stdin")
+    selector.register(stdin_fd, selectors.EVENT_READ, "stdin")
     selector.register(PROCESS.stdout, selectors.EVENT_READ, "stdout")
     selector.register(PROCESS.stderr, selectors.EVENT_READ, "stderr")
     open_streams = {"stdout", "stderr"}
@@ -78,7 +104,8 @@ def main():
 
         for key, _mask in selector.select(timeout=0.1):
             stream_type = key.data
-            chunk = os.read(key.fileobj.fileno(), CHUNK_SIZE)
+            fd = key.fd if key.fd is not None else key.fileobj.fileno()
+            chunk = os.read(fd, CHUNK_SIZE)
 
             if stream_type == "stdin":
                 if not chunk:
@@ -102,7 +129,8 @@ def main():
             if not chunk:
                 selector.unregister(key.fileobj)
                 open_streams.discard(stream_type)
-                key.fileobj.close()
+                if hasattr(key.fileobj, "close"):
+                    key.fileobj.close()
                 continue
 
             emit({"type": stream_type, "data": base64.b64encode(chunk).decode("ascii")})

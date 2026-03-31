@@ -147,6 +147,7 @@ defmodule Prehen.Agents.Transports.Stdio do
     :ok
   catch
     :error, _ -> :ok
+    :exit, _ -> :ok
   end
 
   def terminate(_reason, _state), do: :ok

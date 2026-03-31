@@ -11,6 +11,7 @@ defmodule Prehen.Agents.Wrappers.Passthrough do
   alias Prehen.Agents.Wrappers.ExecutableHost
 
   @behaviour Wrapper
+  @open_session_timeout_ms 16_000
 
   @impl Wrapper
   def start_link(opts) do
@@ -19,7 +20,7 @@ defmodule Prehen.Agents.Wrappers.Passthrough do
 
   @impl Wrapper
   def open_session(wrapper, attrs) when is_pid(wrapper) and is_map(attrs) do
-    GenServer.call(wrapper, {:open_session, attrs})
+    GenServer.call(wrapper, {:open_session, attrs}, @open_session_timeout_ms)
   end
 
   @impl Wrapper
@@ -71,28 +72,33 @@ defmodule Prehen.Agents.Wrappers.Passthrough do
 
   def handle_call({:open_session, attrs}, _from, state) do
     session_config = state.session_config
-    gateway_session_id = fetch_required_value(attrs, :gateway_session_id)
     workspace = fetch_optional_value(attrs, :workspace) || session_config.workspace
     profile = build_profile(session_config)
 
-    case Stdio.start_link(profile: profile, gateway_session_id: gateway_session_id) do
-      {:ok, transport} ->
-        case Stdio.open_session(transport, %{workspace: workspace}) do
-          {:ok, %{agent_session_id: agent_session_id} = opened} ->
-            {:reply, {:ok, opened},
-             %{state | transport: transport, agent_session_id: agent_session_id}}
+    case fetch_required_value(attrs, :gateway_session_id) do
+      {:ok, gateway_session_id} ->
+        case Stdio.start_link(profile: profile, gateway_session_id: gateway_session_id) do
+          {:ok, transport} ->
+            case Stdio.open_session(transport, %{workspace: workspace}) do
+              {:ok, %{agent_session_id: agent_session_id} = opened} ->
+                {:reply, {:ok, opened},
+                 %{state | transport: transport, agent_session_id: agent_session_id}}
+
+              {:error, reason} ->
+                maybe_stop_transport(transport)
+                {:reply, {:error, reason}, %{state | transport: nil, agent_session_id: nil}}
+
+              other ->
+                maybe_stop_transport(transport)
+                {:reply, other, %{state | transport: nil, agent_session_id: nil}}
+            end
 
           {:error, reason} ->
-            maybe_stop_transport(transport)
             {:reply, {:error, reason}, %{state | transport: nil, agent_session_id: nil}}
-
-          other ->
-            maybe_stop_transport(transport)
-            {:reply, other, %{state | transport: nil, agent_session_id: nil}}
         end
 
       {:error, reason} ->
-        {:reply, {:error, reason}, %{state | transport: nil, agent_session_id: nil}}
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -154,12 +160,18 @@ defmodule Prehen.Agents.Wrappers.Passthrough do
   end
 
   defp fetch_required_value(map, key) do
-    fetch_optional_value(map, key) || raise KeyError, key: key, term: map
+    case fetch_optional_value(map, key) do
+      value when is_binary(value) and value != "" -> {:ok, value}
+      _ -> {:error, missing_required_field_reason(key)}
+    end
   end
 
   defp fetch_optional_value(map, key) do
     Map.get(map, key) || Map.get(map, Atom.to_string(key))
   end
+
+  defp missing_required_field_reason(:gateway_session_id), do: :missing_gateway_session_id
+  defp missing_required_field_reason(key), do: {:missing_required_field, key}
 
   defp maybe_stop_transport(transport) when is_pid(transport) do
     try do
