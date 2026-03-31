@@ -15,7 +15,7 @@ defmodule Prehen.Integration.WebInboxTest do
     registry_pid = Process.whereis(Registry)
     original = :sys.get_state(registry_pid)
 
-    set_registry([fake_profile()])
+    set_registry([fake_profile()], fake_implementations())
 
     on_exit(fn ->
       :sys.replace_state(registry_pid, fn _ -> original end)
@@ -34,26 +34,26 @@ defmodule Prehen.Integration.WebInboxTest do
     conn = get(build_conn(), "/agents")
 
     assert %{"agents" => agents} = json_response(conn, 200)
-    assert [%{"agent" => "fake_stdio", "name" => "fake_stdio", "default" => true}] = agents
+    assert [%{"agent" => "coder", "name" => "Coder", "default" => true}] = agents
   end
 
   test "default agent flag follows registry order rather than sorted response order" do
-    zebra = fake_profile("zebra_stdio")
-    alpha = fake_profile("alpha_stdio")
-    set_registry([zebra, alpha])
+    zebra = fake_profile("zebra", "Zebra")
+    alpha = fake_profile("alpha", "Alpha")
+    set_registry([zebra, alpha], fake_implementations())
 
     conn = get(build_conn(), "/agents")
 
     assert %{"agents" => agents} = json_response(conn, 200)
 
     assert [
-             %{"agent" => "alpha_stdio", "default" => false},
-             %{"agent" => "zebra_stdio", "default" => true}
+             %{"agent" => "alpha", "default" => false},
+             %{"agent" => "zebra", "default" => true}
            ] = Enum.map(agents, &Map.take(&1, ["agent", "default"]))
   end
 
   test "returns an empty agent list when no agents are configured" do
-    set_registry([])
+    set_registry([], [])
 
     conn = get(build_conn(), "/agents")
 
@@ -61,9 +61,9 @@ defmodule Prehen.Integration.WebInboxTest do
   end
 
   test "supports create detail history and stop through inbox JSON endpoints" do
-    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "fake_stdio"})
+    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "coder"})
 
-    assert %{"session_id" => session_id, "agent" => "fake_stdio", "status" => "attached"} =
+    assert %{"session_id" => session_id, "agent" => "coder", "status" => "attached"} =
              json_response(conn, 201)
 
     on_exit(fn -> cleanup_session(session_id) end)
@@ -91,7 +91,7 @@ defmodule Prehen.Integration.WebInboxTest do
     conn = get(build_conn(), "/inbox/sessions/#{session_id}")
     assert %{"session" => session} = json_response(conn, 200)
     assert session["session_id"] == session_id
-    assert session["agent_name"] == "fake_stdio"
+    assert session["agent_name"] == "coder"
     assert session["status"] in ["idle", "running", "attached"]
 
     conn = delete(build_conn(), "/inbox/sessions/#{session_id}")
@@ -111,7 +111,7 @@ defmodule Prehen.Integration.WebInboxTest do
   end
 
   test "returns a structured create failure when no agents are configured" do
-    set_registry([])
+    set_registry([], [])
 
     conn = post(build_conn(), "/inbox/sessions", %{})
 
@@ -124,14 +124,14 @@ defmodule Prehen.Integration.WebInboxTest do
   test "creates an inbox session with the default agent when agent is omitted" do
     conn = post(build_conn(), "/inbox/sessions", %{})
 
-    assert %{"session_id" => session_id, "agent" => "fake_stdio", "status" => "attached"} =
+    assert %{"session_id" => session_id, "agent" => "coder", "status" => "attached"} =
              json_response(conn, 201)
 
     on_exit(fn -> cleanup_session(session_id) end)
   end
 
   test "stopping a retained inbox session is idempotent" do
-    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "fake_stdio"})
+    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "coder"})
     assert %{"session_id" => session_id, "status" => "attached"} = json_response(conn, 201)
 
     on_exit(fn -> cleanup_session(session_id) end)
@@ -149,7 +149,7 @@ defmodule Prehen.Integration.WebInboxTest do
   end
 
   test "web inbox flow can create over HTTP and submit over SessionChannel" do
-    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "fake_stdio"})
+    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "coder"})
     assert %{"session_id" => session_id} = json_response(conn, 201)
 
     {:ok, _, socket} =
@@ -182,7 +182,7 @@ defmodule Prehen.Integration.WebInboxTest do
   end
 
   test "stops a live inbox session even when projection state is missing" do
-    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "fake_stdio"})
+    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "coder"})
     assert %{"session_id" => session_id, "status" => "attached"} = json_response(conn, 201)
 
     on_exit(fn -> cleanup_session(session_id) end)
@@ -194,10 +194,10 @@ defmodule Prehen.Integration.WebInboxTest do
         conn = delete(build_conn(), "/inbox/sessions/#{session_id}")
         assert response(conn, 204) == ""
 
-        assert {:ok, %{session_id: ^session_id, status: :stopped, agent_name: "fake_stdio"}} =
+        assert {:ok, %{session_id: ^session_id, status: :stopped, agent_name: "coder"}} =
                  wait_until(fn ->
                    case InboxProjection.fetch_session(session_id) do
-                     {:ok, %{status: :stopped, agent_name: "fake_stdio"} = row} -> {:ok, row}
+                     {:ok, %{status: :stopped, agent_name: "coder"} = row} -> {:ok, row}
                      _ -> :retry
                    end
                  end)
@@ -208,7 +208,7 @@ defmodule Prehen.Integration.WebInboxTest do
   end
 
   test "recreates retained row on idempotent delete when registry is already terminal and projection is missing" do
-    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "fake_stdio"})
+    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "coder"})
     assert %{"session_id" => session_id, "status" => "attached"} = json_response(conn, 201)
 
     on_exit(fn -> cleanup_session(session_id) end)
@@ -216,10 +216,10 @@ defmodule Prehen.Integration.WebInboxTest do
     conn = delete(build_conn(), "/inbox/sessions/#{session_id}")
     assert response(conn, 204) == ""
 
-    assert {:ok, %{session_id: ^session_id, status: :stopped, agent_name: "fake_stdio"}} =
+    assert {:ok, %{session_id: ^session_id, status: :stopped, agent_name: "coder"}} =
              wait_until(fn ->
                case InboxProjection.fetch_session(session_id) do
-                 {:ok, %{status: :stopped, agent_name: "fake_stdio"} = row} -> {:ok, row}
+                 {:ok, %{status: :stopped, agent_name: "coder"} = row} -> {:ok, row}
                  _ -> :retry
                end
              end)
@@ -229,29 +229,55 @@ defmodule Prehen.Integration.WebInboxTest do
     conn = delete(build_conn(), "/inbox/sessions/#{session_id}")
     assert response(conn, 204) == ""
 
-    assert {:ok, %{session_id: ^session_id, status: :stopped, agent_name: "fake_stdio"}} =
+    assert {:ok, %{session_id: ^session_id, status: :stopped, agent_name: "coder"}} =
              wait_until(fn ->
                case InboxProjection.fetch_session(session_id) do
-                 {:ok, %{status: :stopped, agent_name: "fake_stdio"} = row} -> {:ok, row}
+                 {:ok, %{status: :stopped, agent_name: "coder"} = row} -> {:ok, row}
                  _ -> :retry
                end
              end)
   end
 
-  defp fake_profile(name \\ "fake_stdio") do
+  defp fake_profile(name \\ "coder", label \\ "Coder") do
     %Profile{
       name: name,
-      command: ["mix", "run", "--no-start", "test/support/fake_stdio_agent.exs"]
+      label: label,
+      implementation: "#{name}_impl",
+      default_provider: "openai",
+      default_model: "gpt-5",
+      prompt_profile: "#{name}_default",
+      workspace_policy: %{mode: "scoped"},
+      transport: :stdio
     }
   end
 
-  defp set_registry(profiles) do
+  defp fake_implementations do
+    [
+      fake_implementation("coder_impl"),
+      fake_implementation("zebra_impl"),
+      fake_implementation("alpha_impl")
+    ]
+  end
+
+  defp fake_implementation(name) do
+    %{
+      name: name,
+      command: "mix",
+      args: ["run", "--no-start", "test/support/fake_stdio_agent.exs"],
+      env: %{},
+      wrapper: Prehen.Agents.Wrappers.PiCodingAgent
+    }
+  end
+
+  defp set_registry(profiles, implementations) do
     registry_pid = Process.whereis(Registry)
 
     :sys.replace_state(registry_pid, fn _ ->
       %{
         ordered: profiles,
-        by_name: Map.new(profiles, fn %Profile{name: name} = profile -> {name, profile} end)
+        by_name: Map.new(profiles, fn %Profile{name: name} = profile -> {name, profile} end),
+        implementations_ordered: implementations,
+        implementations_by_name: Map.new(implementations, fn impl -> {impl.name, impl} end)
       }
     end)
   end

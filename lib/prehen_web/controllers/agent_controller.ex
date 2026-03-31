@@ -1,6 +1,7 @@
 defmodule PrehenWeb.AgentController do
   use Phoenix.Controller, formats: [:json]
 
+  alias Prehen.Agents.Profile
   alias Prehen.Agents.Registry
 
   def index(conn, _params) do
@@ -12,7 +13,7 @@ defmodule PrehenWeb.AgentController do
       |> Enum.map(fn profile ->
         %{
           agent: profile.name,
-          name: profile.name,
+          name: Profile.display_name(profile),
           default: profile.name == default_agent
         }
       end)

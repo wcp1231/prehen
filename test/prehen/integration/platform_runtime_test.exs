@@ -14,14 +14,7 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
     registry_pid = Process.whereis(Registry)
     original = :sys.get_state(registry_pid)
 
-    fake_profile = %Profile{
-      name: "fake_stdio",
-      command: ["mix", "run", "--no-start", "test/support/fake_stdio_agent.exs"]
-    }
-
-    :sys.replace_state(registry_pid, fn _state ->
-      %{ordered: [fake_profile], by_name: %{"fake_stdio" => fake_profile}}
-    end)
+    set_registry([coder_profile()], [fake_stdio_implementation()])
 
     on_exit(fn ->
       :sys.replace_state(registry_pid, fn _state -> original end)
@@ -33,9 +26,9 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
   test "control plane HTTP endpoints route through gateway sessions" do
     conn = build_conn()
 
-    conn = post(conn, "/sessions", %{"agent" => "fake_stdio"})
+    conn = post(conn, "/sessions", %{"agent" => "coder"})
     assert created = json_response(conn, 201)
-    assert %{"session_id" => session_id, "agent" => "fake_stdio"} = created
+    assert %{"session_id" => session_id, "agent" => "coder"} = created
 
     on_exit(fn -> Surface.stop_session(session_id) end)
 
@@ -49,13 +42,11 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
     conn = get(build_conn(), "/agents")
     assert agents = json_response(conn, 200)
 
-    assert Enum.any?(agents["agents"], fn agent ->
-             agent["agent"] == "fake_stdio"
-           end)
+    assert agents["agents"] == [%{"agent" => "coder", "default" => true, "name" => "Coder"}]
   end
 
   test "GET /sessions/:id returns JSON-safe gateway status without worker pid" do
-    conn = post(build_conn(), "/sessions", %{"agent" => "fake_stdio"})
+    conn = post(build_conn(), "/sessions", %{"agent" => "coder"})
     assert %{"session_id" => session_id} = json_response(conn, 201)
 
     on_exit(fn -> Surface.stop_session(session_id) end)
@@ -69,7 +60,7 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
   end
 
   test "GET /sessions/:id omits worker_pid after retained terminal stop" do
-    conn = post(build_conn(), "/sessions", %{"agent" => "fake_stdio"})
+    conn = post(build_conn(), "/sessions", %{"agent" => "coder"})
     assert %{"session_id" => session_id} = json_response(conn, 201)
 
     assert :ok = Surface.stop_session(session_id)
@@ -83,7 +74,7 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
   end
 
   test "POST /sessions/:id/messages returns 400 when message text is missing" do
-    conn = post(build_conn(), "/sessions", %{"agent" => "fake_stdio"})
+    conn = post(build_conn(), "/sessions", %{"agent" => "coder"})
     assert %{"session_id" => session_id} = json_response(conn, 201)
 
     on_exit(fn -> Surface.stop_session(session_id) end)
@@ -99,7 +90,7 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
 
   test "records gateway lifecycle events for a session run" do
     assert {:ok, %{session_id: gateway_session_id}} =
-             Prehen.Client.Surface.create_session(agent: "fake_stdio")
+             Prehen.Client.Surface.create_session(agent: "coder")
 
     on_exit(fn -> Surface.stop_session(gateway_session_id) end)
 
@@ -113,7 +104,7 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
   end
 
   test "projects live status transitions and retains history after stop" do
-    assert {:ok, %{session_id: session_id}} = Surface.create_session(agent: "fake_stdio")
+    assert {:ok, %{session_id: session_id}} = Surface.create_session(agent: "coder")
 
     assert {:ok, row} = InboxProjection.fetch_session(session_id)
     assert row.status == :attached
@@ -164,4 +155,40 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
   end
 
   defp wait_until(_fun, 0), do: {:error, :timeout}
+
+  defp coder_profile do
+    %Profile{
+      name: "coder",
+      label: "Coder",
+      implementation: "fake_stdio_impl",
+      default_provider: "openai",
+      default_model: "gpt-5",
+      prompt_profile: "coder_default",
+      workspace_policy: %{mode: "scoped"},
+      transport: :stdio
+    }
+  end
+
+  defp fake_stdio_implementation do
+    %{
+      name: "fake_stdio_impl",
+      command: "mix",
+      args: ["run", "--no-start", "test/support/fake_stdio_agent.exs"],
+      env: %{},
+      wrapper: Prehen.Agents.Wrappers.PiCodingAgent
+    }
+  end
+
+  defp set_registry(profiles, implementations) do
+    registry_pid = Process.whereis(Registry)
+
+    :sys.replace_state(registry_pid, fn _state ->
+      %{
+        ordered: profiles,
+        by_name: Map.new(profiles, fn %Profile{name: name} = profile -> {name, profile} end),
+        implementations_ordered: implementations,
+        implementations_by_name: Map.new(implementations, fn impl -> {impl.name, impl} end)
+      }
+    end)
+  end
 end
