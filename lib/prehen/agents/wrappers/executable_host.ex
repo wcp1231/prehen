@@ -22,8 +22,12 @@ defmodule Prehen.Agents.Wrappers.ExecutableHost do
   end
 
   def support_check(%{command: command}) when is_binary(command) do
-    case resolve_command(command) do
-      {:ok, _executable} -> :ok
+    with {:ok, _target} <- resolve_command(command),
+         {:ok, _relay} <- resolve_command("python3"),
+         :ok <- ensure_relay_script() do
+      :ok
+    else
+      :error -> {:error, :relay_script_missing}
       {:error, reason} -> {:error, reason}
     end
   end
@@ -38,11 +42,12 @@ defmodule Prehen.Agents.Wrappers.ExecutableHost do
     command = Keyword.fetch!(opts, :command)
     args = Keyword.get(opts, :args, [])
     env = Keyword.get(opts, :env, %{})
-    stderr_to_stdout = Keyword.get(opts, :stderr_to_stdout, false)
 
     with {:ok, executable} <- resolve_command(command),
-         {:ok, port} <- open_port(executable, args, env, stderr_to_stdout) do
-      {:ok, %{owner: owner, port: port}}
+         {:ok, relay_executable} <- resolve_command("python3"),
+         :ok <- ensure_relay_script(),
+         {:ok, port} <- open_port(relay_executable, relay_args(executable, args, env), %{}) do
+      {:ok, %{owner: owner, port: port, buffer: "", exit_reported?: false}}
     end
   end
 
@@ -60,18 +65,26 @@ defmodule Prehen.Agents.Wrappers.ExecutableHost do
   end
 
   @impl true
-  def handle_info({port, {:data, data}}, %{port: port, owner: owner} = state) do
-    send(owner, {:executable_host, self(), {:stdout, data}})
-    {:noreply, state}
+  def handle_info({port, {:data, data}}, %{port: port} = state) do
+    {events, buffer, exit_reported?} = decode_events(state.buffer <> data, state.exit_reported?)
+
+    Enum.each(events, fn event ->
+      dispatch_event(state.owner, self(), event)
+    end)
+
+    {:noreply, %{state | buffer: buffer, exit_reported?: exit_reported?}}
   end
 
-  def handle_info({port, {:exit_status, status}}, %{port: port, owner: owner} = state) do
-    send(owner, {:executable_host, self(), {:exit_status, status}})
+  def handle_info({port, {:exit_status, status}}, %{port: port} = state) do
+    maybe_dispatch_exit(state.owner, self(), state.exit_reported?, status)
     {:stop, :normal, state}
   end
 
-  def handle_info({:EXIT, port, reason}, %{port: port, owner: owner} = state) do
-    send(owner, {:executable_host, self(), {:exit, reason}})
+  def handle_info({:EXIT, port, reason}, %{port: port} = state) do
+    if not state.exit_reported? do
+      dispatch_event(state.owner, self(), {:exit, reason})
+    end
+
     {:stop, :normal, state}
   end
 
@@ -101,21 +114,16 @@ defmodule Prehen.Agents.Wrappers.ExecutableHost do
     if String.contains?(command, "/"), do: command
   end
 
-  defp open_port(command, args, env, stderr_to_stdout) do
-    port_opts = [
-      :binary,
-      :exit_status,
-      :use_stdio,
-      :hide,
-      {:args, Enum.map(args, &to_string/1)},
-      {:env, normalize_env(env)}
-    ]
-
+  defp open_port(command, args, env) do
     port =
-      Port.open(
-        {:spawn_executable, command},
-        maybe_merge_stderr(port_opts, stderr_to_stdout)
-      )
+      Port.open({:spawn_executable, command}, [
+        :binary,
+        :exit_status,
+        :use_stdio,
+        :hide,
+        {:args, Enum.map(args, &to_string/1)},
+        {:env, normalize_env(env)}
+      ])
 
     {:ok, port}
   rescue
@@ -130,6 +138,60 @@ defmodule Prehen.Agents.Wrappers.ExecutableHost do
 
   defp normalize_env(_env), do: []
 
-  defp maybe_merge_stderr(opts, true), do: [:stderr_to_stdout | opts]
-  defp maybe_merge_stderr(opts, false), do: opts
+  defp relay_args(command, args, env) do
+    payload =
+      %{command: command, args: Enum.map(args, &to_string/1), env: normalize_env_map(env)}
+      |> Jason.encode!()
+      |> Base.url_encode64(padding: false)
+
+    [relay_script_path(), payload]
+  end
+
+  defp normalize_env_map(env) when is_map(env) do
+    Map.new(env, fn {key, value} -> {to_string(key), to_string(value)} end)
+  end
+
+  defp normalize_env_map(_env), do: %{}
+
+  defp decode_events(buffer, exit_reported?, acc \\ [])
+
+  defp decode_events(<<length::32, rest::binary>>, exit_reported?, acc)
+       when byte_size(rest) >= length do
+    <<payload::binary-size(length), remainder::binary>> = rest
+    event = decode_event(payload)
+
+    decode_events(remainder, exit_reported?(event, exit_reported?), [event | acc])
+  rescue
+    _error -> {Enum.reverse(acc), <<length::32, rest::binary>>, exit_reported?}
+  end
+
+  defp decode_events(buffer, exit_reported?, acc), do: {Enum.reverse(acc), buffer, exit_reported?}
+
+  defp exit_reported?({:exit_status, _status}, _previous), do: true
+  defp exit_reported?(_event, previous), do: previous
+
+  defp dispatch_event(owner, host, event) do
+    send(owner, {:executable_host, host, event})
+  end
+
+  defp maybe_dispatch_exit(owner, host, false, status),
+    do: dispatch_event(owner, host, {:exit_status, status})
+
+  defp maybe_dispatch_exit(_owner, _host, true, _status), do: :ok
+
+  defp relay_script_path do
+    Path.expand("executable_relay.py", __DIR__)
+  end
+
+  defp ensure_relay_script do
+    if File.regular?(relay_script_path()), do: :ok, else: :error
+  end
+
+  defp decode_event(payload) do
+    case Jason.decode!(payload) do
+      %{"type" => "stdout", "data" => data} -> {:stdout, Base.decode64!(data)}
+      %{"type" => "stderr", "data" => data} -> {:stderr, Base.decode64!(data)}
+      %{"type" => "exit_status", "status" => status} -> {:exit_status, status}
+    end
+  end
 end

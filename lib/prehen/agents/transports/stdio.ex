@@ -5,6 +5,8 @@ defmodule Prehen.Agents.Transports.Stdio do
 
   require Logger
 
+  @call_timeout_ms 15_000
+
   alias Prehen.Agents.Profile
   alias Prehen.Agents.Protocol.Frame
   alias Prehen.Agents.Transport
@@ -18,7 +20,7 @@ defmodule Prehen.Agents.Transports.Stdio do
 
   @impl Transport
   def open_session(transport, attrs) when is_pid(transport) and is_map(attrs) do
-    GenServer.call(transport, {:open_session, attrs})
+    GenServer.call(transport, {:open_session, attrs}, @call_timeout_ms)
   end
 
   @impl Transport
@@ -52,8 +54,7 @@ defmodule Prehen.Agents.Transports.Stdio do
              owner: self(),
              command: profile_command(profile),
              args: profile_args(profile),
-             env: profile_env(profile),
-             stderr_to_stdout: true
+             env: profile_env(profile)
            ) do
       {:ok,
        %{
@@ -109,6 +110,15 @@ defmodule Prehen.Agents.Transports.Stdio do
   @impl GenServer
   def handle_info({:executable_host, host, {:stdout, data}}, %{host: host} = state) do
     {:noreply, consume_data(state, data)}
+  end
+
+  def handle_info({:executable_host, host, {:stderr, data}}, %{host: host} = state) do
+    Logger.debug("ignoring stdio stderr output",
+      output: String.trim(data),
+      agent: state.profile.name
+    )
+
+    {:noreply, state}
   end
 
   def handle_info(
