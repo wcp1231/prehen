@@ -20,6 +20,9 @@ defmodule Prehen.Config do
   def resolve_session_config!(config, opts \\ []) do
     profile = resolve_profile!(Map.get(config, :agent_profiles, []), opts)
 
+    implementation =
+      resolve_implementation!(Map.get(config, :agent_implementations, []), profile.implementation)
+
     %SessionConfig{
       profile_name: profile.name,
       provider:
@@ -27,7 +30,9 @@ defmodule Prehen.Config do
       model: normalize_optional_string(Keyword.get(opts, :model)) || profile.default_model,
       prompt_profile:
         normalize_optional_string(Keyword.get(opts, :prompt_profile)) || profile.prompt_profile,
-      workspace_policy: profile.workspace_policy
+      workspace_policy: profile.workspace_policy,
+      implementation: implementation,
+      workspace: normalize_optional_string(Keyword.get(opts, :workspace))
     }
   end
 
@@ -238,6 +243,13 @@ defmodule Prehen.Config do
   end
 
   defp normalize_optional_string(_value), do: nil
+
+  defp resolve_implementation!(implementations, implementation_name) do
+    Enum.find(implementations, fn
+      %Implementation{name: ^implementation_name} -> true
+      _implementation -> false
+    end) || raise KeyError, key: implementation_name, term: implementations
+  end
 
   defp normalize_optional_command([command | args]) when is_binary(command) do
     [command | Enum.map(args, &to_string/1)]

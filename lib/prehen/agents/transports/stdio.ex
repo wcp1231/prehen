@@ -8,6 +8,7 @@ defmodule Prehen.Agents.Transports.Stdio do
   alias Prehen.Agents.Profile
   alias Prehen.Agents.Protocol.Frame
   alias Prehen.Agents.Transport
+  alias Prehen.Agents.Wrappers.ExecutableHost
 
   @behaviour Transport
 
@@ -46,13 +47,19 @@ defmodule Prehen.Agents.Transports.Stdio do
     gateway_session_id = Keyword.fetch!(opts, :gateway_session_id)
     Process.flag(:trap_exit, true)
 
-    with {:ok, command, args} <- build_command(profile),
-         {:ok, port} <- open_port(command, args, profile) do
+    with {:ok, host} <-
+           ExecutableHost.start_link(
+             owner: self(),
+             command: profile_command(profile),
+             args: profile_args(profile),
+             env: profile_env(profile),
+             stderr_to_stdout: true
+           ) do
       {:ok,
        %{
          profile: profile,
          gateway_session_id: gateway_session_id,
-         port: port,
+         host: host,
          buffer: "",
          open_from: nil,
          pending_frames: :queue.new(),
@@ -70,7 +77,7 @@ defmodule Prehen.Agents.Transports.Stdio do
         workspace: Map.get(attrs, :workspace)
       )
 
-    case write_frame(state.port, frame) do
+    case write_frame(state.host, frame) do
       :ok -> {:noreply, %{state | open_from: from}}
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
@@ -81,7 +88,7 @@ defmodule Prehen.Agents.Transports.Stdio do
   end
 
   def handle_call({:send_frame, frame}, _from, state) do
-    {:reply, write_frame(state.port, frame), state}
+    {:reply, write_frame(state.host, frame), state}
   end
 
   def handle_call({:recv_frame, _timeout}, _from, %{recv_from: recv_from} = state)
@@ -100,13 +107,13 @@ defmodule Prehen.Agents.Transports.Stdio do
   end
 
   @impl GenServer
-  def handle_info({port, {:data, data}}, %{port: port} = state) do
+  def handle_info({:executable_host, host, {:stdout, data}}, %{host: host} = state) do
     {:noreply, consume_data(state, data)}
   end
 
   def handle_info(
-        {port, {:exit_status, status}},
-        %{port: port, open_from: from, recv_from: recv_from} = state
+        {:executable_host, host, {:exit_status, status}},
+        %{host: host, open_from: from, recv_from: recv_from} = state
       ) do
     if from, do: GenServer.reply(from, {:error, {:exit_status, status}})
     if recv_from, do: GenServer.reply(recv_from, {:error, {:exit_status, status}})
@@ -114,8 +121,8 @@ defmodule Prehen.Agents.Transports.Stdio do
   end
 
   def handle_info(
-        {:EXIT, port, reason},
-        %{port: port, open_from: from, recv_from: recv_from} = state
+        {:executable_host, host, {:exit, reason}},
+        %{host: host, open_from: from, recv_from: recv_from} = state
       ) do
     if from, do: GenServer.reply(from, {:error, reason})
     if recv_from, do: GenServer.reply(recv_from, {:error, reason})
@@ -125,8 +132,8 @@ defmodule Prehen.Agents.Transports.Stdio do
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl GenServer
-  def terminate(_reason, %{port: port}) when is_port(port) do
-    Port.close(port)
+  def terminate(_reason, %{host: host}) when is_pid(host) do
+    ExecutableHost.stop(host)
     :ok
   catch
     :error, _ -> :ok
@@ -180,15 +187,10 @@ defmodule Prehen.Agents.Transports.Stdio do
     end
   end
 
-  defp write_frame(port, frame) do
+  defp write_frame(host, frame) do
     payload = [Jason.encode_to_iodata!(frame), ?\n]
 
-    case Port.command(port, payload) do
-      true -> :ok
-      false -> {:error, :port_closed}
-    end
-  rescue
-    error -> {:error, error}
+    ExecutableHost.write(host, payload)
   end
 
   defp enqueue_frame(%{recv_from: recv_from} = state, frame) when not is_nil(recv_from) do
@@ -200,44 +202,14 @@ defmodule Prehen.Agents.Transports.Stdio do
     %{state | pending_frames: :queue.in(frame, pending_frames)}
   end
 
-  defp build_command(%Profile{command: [command | args]}), do: resolve_command(command, args)
+  defp profile_command(%Profile{command: [command | _args]}), do: command
+  defp profile_command(%Profile{command: command}) when is_binary(command), do: command
+  defp profile_command(_profile), do: nil
 
-  defp build_command(%Profile{command: command, args: args}) when is_binary(command),
-    do: resolve_command(command, args)
+  defp profile_args(%Profile{command: [_command | args]}), do: Enum.map(args, &to_string/1)
+  defp profile_args(%Profile{args: args}) when is_list(args), do: Enum.map(args, &to_string/1)
+  defp profile_args(_profile), do: []
 
-  defp build_command(_profile), do: {:error, :invalid_command}
-
-  defp resolve_command(command, args) do
-    case System.find_executable(command) || take_path_command(command) do
-      nil -> {:error, {:command_not_found, command}}
-      executable -> {:ok, executable, Enum.map(args, &to_string/1)}
-    end
-  end
-
-  defp take_path_command(command) do
-    if String.contains?(command, "/"), do: command
-  end
-
-  defp open_port(command, args, profile) do
-    env =
-      profile.env
-      |> Enum.map(fn {key, value} ->
-        {to_charlist(to_string(key)), to_charlist(to_string(value))}
-      end)
-
-    port =
-      Port.open({:spawn_executable, command}, [
-        :binary,
-        :exit_status,
-        :use_stdio,
-        :stderr_to_stdout,
-        :hide,
-        {:args, args},
-        {:env, env}
-      ])
-
-    {:ok, port}
-  rescue
-    error -> {:error, error}
-  end
+  defp profile_env(%Profile{env: env}) when is_map(env), do: env
+  defp profile_env(_profile), do: %{}
 end
