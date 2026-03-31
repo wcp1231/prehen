@@ -10,12 +10,20 @@ defmodule Prehen.Gateway.Supervisor do
   @impl true
   def init(opts) do
     children = [
-      {Prehen.Agents.Registry, [profiles: Keyword.get(opts, :agent_profiles, [])]},
+      {Prehen.Agents.Registry, registry_opts(opts)},
       {Prehen.Gateway.SessionRegistry, []},
       {Prehen.Gateway.InboxProjection, []},
       {DynamicSupervisor, strategy: :one_for_one, name: Prehen.Gateway.SessionWorkerSupervisor}
     ]
 
     Supervisor.init(children, strategy: :one_for_one)
+  end
+
+  @doc false
+  def registry_opts(opts) do
+    [
+      profiles: Keyword.get(opts, :agent_profiles, []),
+      implementations: Keyword.get(opts, :agent_implementations, [])
+    ]
   end
 end

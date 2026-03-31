@@ -5,7 +5,6 @@ defmodule Prehen.Agents.Registry do
 
   alias Prehen.Agents.Implementation
   alias Prehen.Agents.Profile
-  alias Prehen.Config
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   def all, do: GenServer.call(__MODULE__, :all)
@@ -15,11 +14,7 @@ defmodule Prehen.Agents.Registry do
   @impl true
   def init(opts) do
     profiles = Keyword.get(opts, :profiles, [])
-
-    implementations =
-      Keyword.get_lazy(opts, :implementations, fn ->
-        Config.load().agent_implementations
-      end)
+    implementations = Keyword.get(opts, :implementations, [])
 
     state = %{
       ordered: profiles,

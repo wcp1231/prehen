@@ -22,7 +22,7 @@ defmodule Prehen.Application do
 
     children = [
       {Phoenix.PubSub, name: Prehen.PubSub},
-      {Prehen.Gateway.Supervisor, [agent_profiles: config.agent_profiles]},
+      {Prehen.Gateway.Supervisor, gateway_opts(config)},
       {Prehen.Observability.TraceCollector, []},
       PrehenWeb.Endpoint
     ]
@@ -30,6 +30,14 @@ defmodule Prehen.Application do
     opts = [strategy: :one_for_one, name: Prehen.Supervisor]
     Logger.info("prehen supervision tree booting (#{length(children)} children)")
     Supervisor.start_link(children, opts)
+  end
+
+  @doc false
+  def gateway_opts(config) when is_map(config) do
+    [
+      agent_profiles: Map.get(config, :agent_profiles, []),
+      agent_implementations: Map.get(config, :agent_implementations, [])
+    ]
   end
 
   @spec health() :: map()

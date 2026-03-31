@@ -47,4 +47,28 @@ defmodule Prehen.ConfigTest do
              prompt_profile: "coder_default"
            } = Config.resolve_session_config!(config, agent: "coder")
   end
+
+  test "drops invalid profile structs that do not satisfy phase 1 requirements" do
+    config =
+      Config.load(
+        agent_profiles: [
+          %Profile{
+            name: "broken",
+            implementation: "pi_coding_agent"
+          }
+        ],
+        agent_implementations: [
+          %Implementation{
+            name: "pi_coding_agent",
+            command: "pi-coding-agent",
+            args: ["serve"],
+            env: %{},
+            wrapper: Prehen.Agents.Wrappers.PiCodingAgent
+          }
+        ]
+      )
+
+    assert config.agent_profiles == []
+    assert_raise KeyError, fn -> Config.resolve_session_config!(config, agent: "broken") end
+  end
 end

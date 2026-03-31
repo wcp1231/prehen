@@ -99,7 +99,10 @@ defmodule Prehen.Config do
     profiles
     |> Enum.reduce([], fn
       %Profile{} = profile, acc ->
-        [profile | acc]
+        case normalize_profile(Map.from_struct(profile)) do
+          {:ok, normalized_profile} -> [normalized_profile | acc]
+          :error -> acc
+        end
 
       attrs, acc when is_map(attrs) ->
         case normalize_profile(attrs) do
@@ -129,7 +132,10 @@ defmodule Prehen.Config do
     implementations
     |> Enum.reduce([], fn
       %Implementation{} = implementation, acc ->
-        [implementation | acc]
+        case normalize_implementation(Map.from_struct(implementation)) do
+          {:ok, normalized_implementation} -> [normalized_implementation | acc]
+          :error -> acc
+        end
 
       attrs, acc when is_map(attrs) ->
         case normalize_implementation(attrs) do
