@@ -208,6 +208,16 @@ defmodule Prehen.Client.SurfaceTest do
       workspace_policy: %{mode: "scoped"}
     }
 
+    slow_open_profile = %Profile{
+      name: "slow_open",
+      label: "Slow Open",
+      implementation: "slow_open_impl",
+      default_provider: "openai",
+      default_model: "gpt-5",
+      prompt_profile: "slow_default",
+      workspace_policy: %{mode: "scoped"}
+    }
+
     fake_stdio_impl = %Implementation{
       name: "fake_stdio_impl",
       command: "mix",
@@ -232,19 +242,29 @@ defmodule Prehen.Client.SurfaceTest do
       wrapper: CorrelatingWrapper
     }
 
+    slow_open_impl = %Implementation{
+      name: "slow_open_impl",
+      command: "mix",
+      args: ["run", "--no-start", "test/support/fake_wrapper_agent.exs"],
+      env: %{"FAKE_WRAPPER_OPEN_DELAY_MS" => "5500"},
+      wrapper: Prehen.Agents.Wrappers.Passthrough
+    }
+
     :sys.replace_state(registry_pid, fn _state ->
       %{
-        ordered: [fake_profile, wrapper_profile, correlated_profile],
+        ordered: [fake_profile, wrapper_profile, correlated_profile, slow_open_profile],
         by_name: %{
           "fake_stdio" => fake_profile,
           "coder" => wrapper_profile,
-          "correlated_agent" => correlated_profile
+          "correlated_agent" => correlated_profile,
+          "slow_open" => slow_open_profile
         },
-        implementations_ordered: [fake_stdio_impl, wrapper_impl, correlated_impl],
+        implementations_ordered: [fake_stdio_impl, wrapper_impl, correlated_impl, slow_open_impl],
         implementations_by_name: %{
           "fake_stdio_impl" => fake_stdio_impl,
           "coder_impl" => wrapper_impl,
-          "correlated_impl" => correlated_impl
+          "correlated_impl" => correlated_impl,
+          "slow_open_impl" => slow_open_impl
         }
       }
     end)
@@ -291,6 +311,17 @@ defmodule Prehen.Client.SurfaceTest do
                       prompt_profile: "coder_default"
                     }}
 
+    assert is_binary(session_id)
+    assert :ok = Surface.stop_session(session_id)
+  end
+
+  test "create_session allows slow wrapper startup through the real session worker path" do
+    started_at = System.monotonic_time(:millisecond)
+
+    assert {:ok, %{session_id: session_id, agent: "slow_open"}} =
+             Surface.create_session(agent: "slow_open")
+
+    assert System.monotonic_time(:millisecond) - started_at >= 5_000
     assert is_binary(session_id)
     assert :ok = Surface.stop_session(session_id)
   end

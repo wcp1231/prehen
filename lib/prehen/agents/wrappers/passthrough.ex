@@ -12,7 +12,6 @@ defmodule Prehen.Agents.Wrappers.Passthrough do
 
   @behaviour Wrapper
   @open_session_timeout_ms 16_000
-  @recv_poll_timeout_ms 100
   @recv_call_slack_ms 300
 
   @impl Wrapper
@@ -37,8 +36,7 @@ defmodule Prehen.Agents.Wrappers.Passthrough do
 
   @impl Wrapper
   def recv_event(wrapper, timeout \\ 5_000) when is_pid(wrapper) do
-    bounded_timeout = min(timeout, @recv_poll_timeout_ms)
-    GenServer.call(wrapper, {:recv_event, bounded_timeout}, bounded_timeout + @recv_call_slack_ms)
+    GenServer.call(wrapper, {:recv_event, timeout}, timeout + @recv_call_slack_ms)
   end
 
   @impl Wrapper

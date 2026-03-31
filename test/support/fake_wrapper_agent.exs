@@ -37,6 +37,8 @@ defmodule FakeWrapperAgent do
   end
 
   defp open_session(payload) do
+    maybe_delay_open()
+
     provider = payload_value(payload, "provider")
     model = payload_value(payload, "model")
     prompt_profile = payload_value(payload, "prompt_profile")
@@ -85,6 +87,19 @@ defmodule FakeWrapperAgent do
       get_in(payload, ["prompt", key]) ||
       get_in(payload, ["prompt", "session", key]) ||
       "missing"
+  end
+
+  defp maybe_delay_open do
+    case System.get_env("FAKE_WRAPPER_OPEN_DELAY_MS") do
+      value when is_binary(value) ->
+        case Integer.parse(String.trim(value)) do
+          {delay_ms, ""} when delay_ms > 0 -> Process.sleep(delay_ms)
+          _ -> :ok
+        end
+
+      _ ->
+        :ok
+    end
   end
 end
 

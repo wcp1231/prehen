@@ -11,6 +11,7 @@ defmodule Prehen.Gateway.SessionWorker do
   alias Prehen.Observability.TraceCollector
 
   @recv_poll_timeout_ms 100
+  @startup_timeout_ms 20_000
 
   def start_session(%SessionConfig{} = session_config, opts \\ []) do
     gateway_session_id = Keyword.get(opts, :gateway_session_id, gen_gateway_session_id())
@@ -54,7 +55,7 @@ defmodule Prehen.Gateway.SessionWorker do
   end
 
   def start_link(opts) do
-    GenServer.start_link(__MODULE__, opts)
+    GenServer.start_link(__MODULE__, opts, timeout: @startup_timeout_ms)
   end
 
   def submit_message(worker, attrs) when is_pid(worker) and is_map(attrs) do
