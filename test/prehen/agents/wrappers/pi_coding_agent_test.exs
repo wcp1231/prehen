@@ -93,6 +93,26 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
     assert {:error, :contract_failed} = PiCodingAgent.support_check(session_config)
   end
 
+  test "support_check classifies open-time process exit as contract failure" do
+    workspace = tmp_workspace_path("open_exit")
+
+    implementation = %Implementation{
+      name: "pi_coding_agent",
+      command: "python3",
+      args: ["-u", "-c", open_exit_script()],
+      env: %{},
+      wrapper: PiCodingAgent
+    }
+
+    session_config =
+      session_config(workspace,
+        implementation: implementation,
+        prompt_context: "You are Prehen coder."
+      )
+
+    assert {:error, :contract_failed} = PiCodingAgent.support_check(session_config)
+  end
+
   @tag skip:
          if(System.get_env("PI_CODING_AGENT_BIN"),
            do: false,
@@ -252,6 +272,18 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
                 "payload": {"ready": True}
             }) + "\\n")
             sys.stdout.flush()
+    """
+  end
+
+  defp open_exit_script do
+    """
+    import json
+    import sys
+
+    for raw in sys.stdin:
+        frame = json.loads(raw)
+        if frame.get("type") == "session.open":
+            sys.exit(17)
     """
   end
 

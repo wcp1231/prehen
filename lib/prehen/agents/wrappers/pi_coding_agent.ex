@@ -302,10 +302,14 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
   defp classify_runtime_probe_result({:error, reason}) do
     case reason do
       :timeout -> {:error, :contract_failed}
+      :normal -> {:error, :contract_failed}
+      :shutdown -> {:error, :contract_failed}
       :missing_gateway_session_id -> {:error, :contract_failed}
       :session_already_open -> {:error, :contract_failed}
       :session_already_opening -> {:error, :contract_failed}
       :session_not_open -> {:error, :contract_failed}
+      {:exit_status, _status} -> {:error, :contract_failed}
+      {:shutdown, _detail} -> {:error, :contract_failed}
       {:missing_required_field, _key} -> {:error, :contract_failed}
       {:timeout, _detail} -> {:error, :contract_failed}
       _other -> {:error, :launch_failed}
