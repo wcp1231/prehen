@@ -77,7 +77,8 @@ defmodule Prehen.Client.SurfaceTest do
         model: session_config.model,
         workspace:
           Map.get(attrs, :workspace) || Map.get(attrs, "workspace") || session_config.workspace,
-        prompt_profile: session_config.prompt_profile
+        prompt_profile: session_config.prompt_profile,
+        prompt: Map.get(attrs, :prompt) || Map.get(attrs, "prompt")
       }
     end
   end
@@ -308,7 +309,19 @@ defmodule Prehen.Client.SurfaceTest do
                       provider: "anthropic",
                       model: "claude-sonnet",
                       workspace: "/tmp/prehen_surface_workspace",
-                      prompt_profile: "coder_default"
+                      prompt_profile: "coder_default",
+                      prompt: %{
+                        prompt_profile: "coder_default",
+                        session: %{
+                          profile_name: "coder",
+                          provider: "anthropic",
+                          model: "claude-sonnet"
+                        },
+                        workspace: %{
+                          root_dir: "/tmp/prehen_surface_workspace",
+                          policy: %{mode: "scoped"}
+                        }
+                      }
                     }}
 
     assert is_binary(session_id)

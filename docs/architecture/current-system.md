@@ -22,8 +22,9 @@ The current hot path is:
 2. `Prehen.Client.Surface`
 3. `Prehen.Gateway.Router`
 4. `Prehen.Gateway.SessionWorker`
-5. `Prehen.Agents.Transports.Stdio` or another registered transport adapter
-6. `PrehenWeb` HTTP controllers and `PrehenWeb.SessionChannel`
+5. `Prehen.Agents.Wrapper` implementation
+6. `Prehen.Agents.Transports.Stdio` or another wrapper-owned host path
+7. `PrehenWeb` HTTP controllers and `PrehenWeb.SessionChannel`
 
 The gateway also keeps a small in-memory trace collector for gateway events only.
 
@@ -46,9 +47,11 @@ Prehen.Gateway.SessionWorker
     |
     +--> Prehen.Gateway.SessionRegistry
     +--> Prehen.Observability.TraceCollector
-    +--> transport adapter
+    +--> wrapper
              |
-             +--> local external agent process
+             +--> transport adapter / executable host
+                      |
+                      +--> local external agent process
 ```
 
 The inbox UI, inbox JSON endpoints, session registry, and retained history all operate against node-local in-memory state. There is no durable recovery or cross-node visibility.
@@ -87,7 +90,8 @@ The inbox UI, inbox JSON endpoints, session registry, and retained history all o
 ### 2.5 `Prehen.Gateway.SessionWorker`
 
 - one worker per gateway session
-- starts the configured transport adapter
+- starts the configured wrapper
+- passes provider, model, workspace, and prompt context into wrapper startup
 - opens the external local agent process
 - records and broadcasts normalized gateway events
 - owns the attachment between `gateway_session_id` and `agent_session_id`
@@ -98,6 +102,7 @@ The inbox UI, inbox JSON endpoints, session registry, and retained history all o
 - tracks `gateway_session_id`, worker pid, agent name, agent session id, and attach status
 - does not own canonical session truth
 - keeps terminal route metadata available for status and idempotent stop handling
+- stops exposing a live worker route once the session reaches `:stopped` or `:crashed`
 
 ### 2.7 `Prehen.Observability.TraceCollector`
 
@@ -114,7 +119,7 @@ The inbox UI, inbox JSON endpoints, session registry, and retained history all o
 ### 2.9 `Prehen.Agents.Transports.Stdio`
 
 - concrete `stdio + JSON Lines` transport
-- starts the agent child process
+- starts the agent child process when selected by a wrapper such as passthrough or `pi-coding-agent`
 - sends and receives JSON frames
 - treats `stderr` as diagnostics
 
@@ -135,10 +140,11 @@ The inbox UI, inbox JSON endpoints, session registry, and retained history all o
 2. `Surface.create_session/1` asks the router for a supported profile.
 3. The router resolves that profile to its internal implementation.
 4. `SessionWorker` is started for that session.
-5. The worker starts the transport and opens the local agent process.
-6. The agent returns `agent_session_id`.
-7. `SessionRegistry` stores the route binding.
-8. `InboxProjection` records a node-local session row for `/inbox`.
+5. The worker builds prompt context and starts the configured wrapper.
+6. The wrapper injects provider, model, workspace, and prompt payload before opening the local agent process.
+7. The agent returns `agent_session_id`.
+8. `SessionRegistry` stores the route binding.
+9. `InboxProjection` records a node-local session row for `/inbox`.
 
 ### 3.2 Message Submission
 
@@ -176,6 +182,7 @@ The inbox UI, inbox JSON endpoints, session registry, and retained history all o
 - single node only
 - one session maps to one local agent process
 - only profiles that pass wrapper support validation are exposed to users
+- unsupported or misconfigured implementations are rejected with classified wrapper or routing errors
 - no persistent session recovery
 - inbox session lists and history are node-local in-memory state
 - stopped sessions stay visible only until restart

@@ -74,6 +74,18 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
     assert message =~ "missing_profile"
   end
 
+  test "POST /sessions returns a classified error for a misconfigured implementation" do
+    set_registry([coder_profile()], [])
+
+    conn = post(build_conn(), "/sessions", %{"agent" => "coder"})
+
+    assert %{"error" => %{"type" => "unprocessable_entity", "message" => message}} =
+             json_response(conn, 422)
+
+    assert message =~ ":agent_implementation_not_found"
+    assert message =~ "fake_stdio_impl"
+  end
+
   test "GET /sessions/:id returns JSON-safe gateway status without worker pid" do
     conn = post(build_conn(), "/sessions", %{"agent" => "coder"})
     assert %{"session_id" => session_id} = json_response(conn, 201)
@@ -100,6 +112,7 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
     assert session["session_id"] == session_id
     assert session["status"] == "stopped"
     refute Map.has_key?(session, "worker_pid")
+    assert {:error, :not_found} = Prehen.Gateway.SessionRegistry.fetch_worker(session_id)
   end
 
   test "POST /sessions/:id/messages returns 400 when message text is missing" do

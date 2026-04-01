@@ -2,6 +2,7 @@ defmodule Prehen.CLITest do
   use ExUnit.Case, async: false
   import ExUnit.CaptureIO
 
+  alias Prehen.Agents.Implementation
   alias Prehen.Agents.Profile
   alias Prehen.Agents.Registry
   alias Prehen.Client.Surface
@@ -12,11 +13,31 @@ defmodule Prehen.CLITest do
 
     fake_profile = %Profile{
       name: "fake_stdio",
-      command: ["mix", "run", "--no-start", "test/support/fake_stdio_agent.exs"]
+      label: "Fake stdio",
+      implementation: "fake_stdio_impl",
+      default_provider: "openai",
+      default_model: "gpt-5",
+      prompt_profile: "fake_default",
+      workspace_policy: %{mode: "scoped"}
+    }
+
+    fake_implementation = %Implementation{
+      name: "fake_stdio_impl",
+      command: "mix",
+      args: ["run", "--no-start", "test/support/fake_stdio_agent.exs"],
+      env: %{},
+      wrapper: Prehen.Agents.Wrappers.Passthrough
     }
 
     :sys.replace_state(registry_pid, fn _state ->
-      %{ordered: [fake_profile], by_name: %{"fake_stdio" => fake_profile}}
+      %{
+        ordered: [fake_profile],
+        by_name: %{"fake_stdio" => fake_profile},
+        supported_ordered: [fake_profile],
+        supported_by_name: %{"fake_stdio" => fake_profile},
+        implementations_ordered: [fake_implementation],
+        implementations_by_name: %{"fake_stdio_impl" => fake_implementation}
+      }
     end)
 
     on_exit(fn ->

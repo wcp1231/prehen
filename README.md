@@ -109,6 +109,47 @@ the opt-in test is a smoke path that verifies wrapper startup, session open, one
 PI_CODING_AGENT_BIN=/abs/path/to/pi-coding-agent mix test test/prehen/agents/wrappers/pi_coding_agent_test.exs
 ```
 
+## Manual Validation Checklist
+
+1. Configure a supported profile and implementation in `config/runtime.exs` or another loaded config file:
+
+```elixir
+config :prehen,
+  agent_profiles: [
+    %{
+      name: "coder",
+      label: "Coder",
+      implementation: "pi_coding_agent",
+      default_provider: "openai",
+      default_model: "gpt-5",
+      prompt_profile: "coder_default",
+      workspace_policy: %{mode: "scoped"}
+    }
+  ],
+  agent_implementations: [
+    %{
+      name: "pi_coding_agent",
+      command: System.get_env("PI_CODING_AGENT_BIN") || "pi-coding-agent",
+      args: [],
+      env: %{},
+      wrapper: Prehen.Agents.Wrappers.PiCodingAgent
+    }
+  ]
+```
+
+2. Point Prehen at `pi-coding-agent` and boot the gateway:
+
+```bash
+export PI_CODING_AGENT_BIN=/abs/path/to/pi-coding-agent
+mix prehen.server
+```
+
+3. Verify one real conversation through `/inbox`:
+   Open `http://localhost:4000/inbox`, create a `coder` session, send a short prompt such as `reply with the word ok`, and confirm the session row appears, the assistant reply streams into history, and stopping the session leaves the row readable but no longer writable.
+
+4. Reject unsupported integrations when any of these are true:
+   The profile does not appear in `GET /agents` or the `/inbox` agent picker, create returns `422` with a classified reason such as `:agent_profile_not_found` or `:agent_implementation_not_found`, or the focused wrapper smoke test returns a classified failure such as `:launch_failed`, `:contract_failed`, `:capability_failed`, or `:policy_rejected`.
+
 ## Gateway Surface
 
 Public gateway entrypoints:

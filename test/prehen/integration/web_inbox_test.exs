@@ -171,6 +171,18 @@ defmodule Prehen.Integration.WebInboxTest do
     assert message =~ "missing_profile"
   end
 
+  test "returns a classified create failure when the profile implementation is misconfigured" do
+    set_registry([fake_profile()], [])
+
+    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "coder"})
+
+    assert %{"error" => %{"type" => "unprocessable_entity", "message" => message}} =
+             json_response(conn, 422)
+
+    assert message =~ ":agent_implementation_not_found"
+    assert message =~ "coder_impl"
+  end
+
   test "stopping a retained inbox session is idempotent" do
     conn = post(build_conn(), "/inbox/sessions", %{"agent" => "coder"})
     assert %{"session_id" => session_id, "status" => "attached"} = json_response(conn, 201)

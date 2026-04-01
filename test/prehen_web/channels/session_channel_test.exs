@@ -1,6 +1,8 @@
 defmodule PrehenWeb.SessionChannelTest do
   use PrehenWeb.ChannelCase, async: false
 
+  alias Prehen.Agents.Implementation
+  alias Prehen.Agents.Profile
   alias Prehen.Gateway.SessionRegistry
 
   test "forwards gateway envelopes as event pushes on handle_info" do
@@ -197,16 +199,36 @@ defmodule PrehenWeb.SessionChannelTest do
   end
 
   test "returns a submit ack payload the inbox browser can correlate" do
-    fake_profile = %Prehen.Agents.Profile{
+    fake_profile = %Profile{
       name: "fake_stdio",
-      command: ["mix", "run", "--no-start", "test/support/fake_stdio_agent.exs"]
+      label: "Fake stdio",
+      implementation: "fake_stdio_impl",
+      default_provider: "openai",
+      default_model: "gpt-5",
+      prompt_profile: "fake_default",
+      workspace_policy: %{mode: "scoped"}
+    }
+
+    fake_implementation = %Implementation{
+      name: "fake_stdio_impl",
+      command: "mix",
+      args: ["run", "--no-start", "test/support/fake_stdio_agent.exs"],
+      env: %{},
+      wrapper: Prehen.Agents.Wrappers.Passthrough
     }
 
     registry_pid = Process.whereis(Prehen.Agents.Registry)
     original = :sys.get_state(registry_pid)
 
     :sys.replace_state(registry_pid, fn _ ->
-      %{ordered: [fake_profile], by_name: %{"fake_stdio" => fake_profile}}
+      %{
+        ordered: [fake_profile],
+        by_name: %{"fake_stdio" => fake_profile},
+        supported_ordered: [fake_profile],
+        supported_by_name: %{"fake_stdio" => fake_profile},
+        implementations_ordered: [fake_implementation],
+        implementations_by_name: %{"fake_stdio_impl" => fake_implementation}
+      }
     end)
 
     on_exit(fn ->
@@ -223,7 +245,7 @@ defmodule PrehenWeb.SessionChannelTest do
       |> subscribe_and_join(PrehenWeb.SessionChannel, "session:#{session_id}")
 
     ref = push(socket, "submit", %{"text" => "hello"})
-    assert_reply ref, :ok, %{"request_id" => request_id}
+    assert_reply ref, :ok, %{"request_id" => request_id}, 1_000
 
     assert_push "event", %{
       "type" => "session.output.delta",

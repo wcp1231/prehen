@@ -175,6 +175,33 @@ defmodule Prehen.Gateway.SessionWorkerTest do
     refute Map.has_key?(session, :agent_session_id)
   end
 
+  test "normal stop removes the live worker route while retaining terminal metadata" do
+    assert {:ok, %{worker_pid: pid, gateway_session_id: "gw_stop"}} =
+             SessionWorker.start_session(
+               session_config(),
+               gateway_session_id: "gw_stop",
+               test_pid: self()
+             )
+
+    monitor_ref = Process.monitor(pid)
+
+    assert {:ok, ^pid} = SessionRegistry.fetch_worker("gw_stop")
+    assert :ok = DynamicSupervisor.terminate_child(Prehen.Gateway.SessionWorkerSupervisor, pid)
+    assert_receive {:DOWN, ^monitor_ref, :process, ^pid, _reason}, 1_000
+
+    assert {:ok, %{status: :stopped, worker_pid: nil} = session} =
+             wait_until(fn ->
+               case SessionRegistry.fetch("gw_stop") do
+                 {:ok, %{status: :stopped, worker_pid: nil} = row} -> {:ok, row}
+                 _ -> :retry
+               end
+             end)
+
+    assert session.agent_name == "fake_stdio"
+    assert is_binary(session.agent_session_id)
+    assert {:error, :not_found} = SessionRegistry.fetch_worker("gw_stop")
+  end
+
   defp session_config(overrides \\ []) do
     base = %SessionConfig{
       profile_name: "fake_stdio",
