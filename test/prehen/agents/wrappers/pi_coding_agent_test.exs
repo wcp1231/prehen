@@ -113,6 +113,86 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
     assert {:error, :contract_failed} = PiCodingAgent.support_check(session_config)
   end
 
+  @tag timeout: 25_000
+  test "support_check classifies open-time hang timeout as contract failure" do
+    workspace = tmp_workspace_path("open_timeout")
+
+    implementation = %Implementation{
+      name: "pi_coding_agent",
+      command: "python3",
+      args: ["-u", "-c", open_timeout_script()],
+      env: %{},
+      wrapper: PiCodingAgent
+    }
+
+    session_config =
+      session_config(workspace,
+        implementation: implementation,
+        prompt_context: "You are Prehen coder."
+      )
+
+    assert {:error, :contract_failed} = PiCodingAgent.support_check(session_config)
+  end
+
+  test "support_check classifies policy rejection directly" do
+    workspace = tmp_workspace_path("policy_rejected")
+
+    implementation = %Implementation{
+      name: "pi_coding_agent",
+      command: "python3",
+      args: ["-u", "-c", compatibility_probe_script()],
+      env: %{},
+      wrapper: PiCodingAgent
+    }
+
+    session_config =
+      session_config(workspace,
+        implementation: implementation,
+        prompt_context: "You are Prehen coder."
+      )
+      |> Map.put(:workspace_policy, %{mode: "disabled"})
+
+    assert {:error, :policy_rejected} = PiCodingAgent.support_check(session_config)
+  end
+
+  test "support_check classifies capability failures directly" do
+    implementation = %Implementation{
+      name: "pi_coding_agent",
+      command: "python3",
+      args: ["-u", "-c", compatibility_probe_script()],
+      env: %{},
+      wrapper: PiCodingAgent
+    }
+
+    session_config =
+      session_config("relative/workspace",
+        implementation: implementation,
+        prompt_context: "You are Prehen coder."
+      )
+
+    assert {:error, :capability_failed} = PiCodingAgent.support_check(session_config)
+  end
+
+  test "support_check classifies launch failures directly" do
+    workspace = tmp_workspace_path("launch_failed")
+
+    implementation = %Implementation{
+      name: "pi_coding_agent",
+      command: "",
+      args: [],
+      env: %{},
+      wrapper: PiCodingAgent
+    }
+
+    session_config =
+      session_config(workspace,
+        implementation: implementation,
+        prompt_context: "You are Prehen coder."
+      )
+
+    assert {:error, :launch_failed} = PiCodingAgent.support_check(session_config)
+  end
+
   @tag skip:
          if(System.get_env("PI_CODING_AGENT_BIN"),
            do: false,
@@ -284,6 +364,18 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
         frame = json.loads(raw)
         if frame.get("type") == "session.open":
             sys.exit(17)
+    """
+  end
+
+  defp open_timeout_script do
+    """
+    import json
+    import time
+
+    for raw in __import__("sys").stdin:
+        frame = json.loads(raw)
+        if frame.get("type") == "session.open":
+            time.sleep(17)
     """
   end
 

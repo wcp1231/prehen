@@ -54,10 +54,10 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
   def support_check(%{__struct__: SessionConfig} = session_config) do
     with {:ok, launch} <- build_launch_spec(session_config),
          {:ok, wrapper} <- start_link(session_config: session_config) do
+      Process.unlink(wrapper)
+
       try do
-        wrapper
-        |> open_session(probe_open_session_attrs(session_config, launch))
-        |> classify_runtime_probe_result()
+        run_runtime_probe(wrapper, probe_open_session_attrs(session_config, launch))
       after
         maybe_stop_wrapper(wrapper)
       end
@@ -292,6 +292,20 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
     end
   end
 
+  defp run_runtime_probe(wrapper, attrs) do
+    try do
+      wrapper
+      |> open_session(attrs)
+      |> classify_runtime_probe_result()
+    catch
+      :exit, {:timeout, {GenServer, :call, _call}} ->
+        {:error, :contract_failed}
+
+      :exit, reason ->
+        classify_runtime_probe_result({:error, reason})
+    end
+  end
+
   defp classify_runtime_probe_result({:ok, opened}) do
     case fetch_agent_session_id(opened) do
       {:ok, _agent_session_id} -> :ok
@@ -312,7 +326,7 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
       {:shutdown, _detail} -> {:error, :contract_failed}
       {:missing_required_field, _key} -> {:error, :contract_failed}
       {:timeout, _detail} -> {:error, :contract_failed}
-      _other -> {:error, :launch_failed}
+      _other -> {:error, :contract_failed}
     end
   end
 
