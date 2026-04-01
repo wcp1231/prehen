@@ -81,18 +81,24 @@ defmodule Prehen.Agents.Wrappers.Passthrough do
       {:ok, gateway_session_id} ->
         case Stdio.start_link(profile: profile, gateway_session_id: gateway_session_id) do
           {:ok, transport} ->
-            case Stdio.open_session(transport, open_attrs) do
-              {:ok, %{agent_session_id: agent_session_id} = opened} ->
+            case safe_transport_call(state, fn ->
+                   Stdio.open_session(transport, open_attrs)
+                 end) do
+              {:ok, {:ok, %{agent_session_id: agent_session_id} = opened}, _next_state} ->
                 {:reply, {:ok, opened},
                  %{state | transport: transport, agent_session_id: agent_session_id}}
 
-              {:error, reason} ->
+              {:ok, {:error, reason}, _next_state} ->
                 maybe_stop_transport(transport)
                 {:reply, {:error, reason}, %{state | transport: nil, agent_session_id: nil}}
 
-              other ->
+              {:ok, other, _next_state} ->
                 maybe_stop_transport(transport)
                 {:reply, other, %{state | transport: nil, agent_session_id: nil}}
+
+              {:error, {:error, reason}, _next_state} ->
+                maybe_stop_transport(transport)
+                {:reply, {:error, reason}, %{state | transport: nil, agent_session_id: nil}}
             end
 
           {:error, reason} ->

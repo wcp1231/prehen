@@ -93,4 +93,36 @@ defmodule Prehen.Agents.Wrappers.PassthroughTest do
     assert {:ok, %{agent_session_id: "agent_gw_slow"}} =
              Passthrough.open_session(wrapper, %{gateway_session_id: "gw_slow"})
   end
+
+  @tag timeout: 25_000
+  test "returns timeout without crashing the wrapper when open_session stalls" do
+    implementation = %Implementation{
+      name: "hung_stdio_impl",
+      command: "python3",
+      args: [
+        "-c",
+        """
+        import json, sys, time
+        line = sys.stdin.readline()
+        json.loads(line)
+        time.sleep(17)
+        """
+      ],
+      env: %{},
+      wrapper: Passthrough
+    }
+
+    session_config = %SessionConfig{
+      profile_name: "coder",
+      implementation: implementation,
+      provider: "openai",
+      model: "gpt-5",
+      prompt_profile: "coder_default",
+      workspace: "/tmp/prehen_wrapper_test"
+    }
+
+    assert {:ok, wrapper} = Passthrough.start_link(session_config: session_config)
+    assert {:error, :timeout} = Passthrough.open_session(wrapper, %{gateway_session_id: "gw_hung"})
+    assert Process.alive?(wrapper)
+  end
 end
