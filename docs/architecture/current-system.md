@@ -1,6 +1,6 @@
 # Prehen Current Architecture (As-Is)
 
-_Last updated: 2026-03-28_
+_Last updated: 2026-04-01_
 
 This document describes the current single-node gateway architecture as implemented today.
 
@@ -8,6 +8,7 @@ Prehen is now a local-first Agent Gateway and control plane:
 
 - external local agent processes own session truth and execution semantics
 - one gateway session maps to one local agent process
+- users select supported agent profiles, not raw executable implementations
 - HTTP and Phoenix Channels are the primary client surface
 - `/inbox` is the operator-facing browser entrypoint on the local node
 - the first supported transport is `stdio + JSON Lines`
@@ -37,6 +38,8 @@ Prehen.Client.Surface
     |
     v
 Prehen.Gateway.Router
+    |
+    +--> Prehen.Agents.Registry (supported profiles + internal implementation mapping)
     |
     v
 Prehen.Gateway.SessionWorker
@@ -68,11 +71,20 @@ The inbox UI, inbox JSON endpoints, session registry, and retained history all o
 
 ### 2.3 `Prehen.Gateway.Router`
 
-- selects an agent profile
-- honors explicit agent selection when provided
-- otherwise picks a local profile from the registry
+- selects a supported agent profile by name
+- treats the phase-1 `agent` wire value as a profile identifier
+- honors explicit profile selection when provided
+- otherwise picks the default supported profile from the registry
+- binds the selected profile to its internal implementation before worker startup
 
-### 2.4 `Prehen.Gateway.SessionWorker`
+### 2.4 `Prehen.Agents.Registry`
+
+- stores configured profiles and implementations
+- runs wrapper support validation at startup so only supported profiles remain user-visible
+- returns supported profiles for `/agents` and default selection
+- keeps implementation lookup internal to router and worker startup
+
+### 2.5 `Prehen.Gateway.SessionWorker`
 
 - one worker per gateway session
 - starts the configured transport adapter
@@ -80,35 +92,37 @@ The inbox UI, inbox JSON endpoints, session registry, and retained history all o
 - records and broadcasts normalized gateway events
 - owns the attachment between `gateway_session_id` and `agent_session_id`
 
-### 2.5 `Prehen.Gateway.SessionRegistry`
+### 2.6 `Prehen.Gateway.SessionRegistry`
 
 - stores route state only
 - tracks `gateway_session_id`, worker pid, agent name, agent session id, and attach status
 - does not own canonical session truth
 - keeps terminal route metadata available for status and idempotent stop handling
 
-### 2.6 `Prehen.Observability.TraceCollector`
+### 2.7 `Prehen.Observability.TraceCollector`
 
 - holds a small in-memory trace for gateway events
 - is used for immediate trace reads in `run/2` and related flows
 - does not persist session history
 
-### 2.7 `Prehen.Gateway.InboxProjection`
+### 2.8 `Prehen.Gateway.InboxProjection`
 
 - keeps inbox session summaries and message history for the browser surface
 - is rebuilt from live events only during the current node lifetime
 - keeps stopped sessions readable after stop, but only until restart
 
-### 2.8 `Prehen.Agents.Transports.Stdio`
+### 2.9 `Prehen.Agents.Transports.Stdio`
 
 - concrete `stdio + JSON Lines` transport
 - starts the agent child process
 - sends and receives JSON frames
 - treats `stderr` as diagnostics
 
-### 2.9 `PrehenWeb`
+### 2.10 `PrehenWeb`
 
-- HTTP controllers create sessions, submit messages, and read session status
+- HTTP controllers expose supported profiles through `GET /agents`
+- session create surfaces continue to use the `agent` wire field, but its value is now a supported profile name
+- provider/model defaults come from the selected profile unless the request overrides them
 - `/inbox` serves the browser shell for operators
 - `PrehenWeb.SessionChannel` subscribes to `session:<gateway_session_id>` and forwards normalized envelopes
 - `PrehenWeb.EventSerializer` strips runtime-only fields and keeps the client payload JSON safe
@@ -118,12 +132,13 @@ The inbox UI, inbox JSON endpoints, session registry, and retained history all o
 ### 3.1 Session Creation
 
 1. Client calls `POST /sessions`, `POST /inbox/sessions`, or `Prehen.create_session/1`.
-2. `Surface.create_session/1` asks the router for a profile.
-3. `SessionWorker` is started for that session.
-4. The worker starts the transport and opens the local agent process.
-5. The agent returns `agent_session_id`.
-6. `SessionRegistry` stores the route binding.
-7. `InboxProjection` records a node-local session row for `/inbox`.
+2. `Surface.create_session/1` asks the router for a supported profile.
+3. The router resolves that profile to its internal implementation.
+4. `SessionWorker` is started for that session.
+5. The worker starts the transport and opens the local agent process.
+6. The agent returns `agent_session_id`.
+7. `SessionRegistry` stores the route binding.
+8. `InboxProjection` records a node-local session row for `/inbox`.
 
 ### 3.2 Message Submission
 
@@ -160,6 +175,7 @@ The inbox UI, inbox JSON endpoints, session registry, and retained history all o
 
 - single node only
 - one session maps to one local agent process
+- only profiles that pass wrapper support validation are exposed to users
 - no persistent session recovery
 - inbox session lists and history are node-local in-memory state
 - stopped sessions stay visible only until restart

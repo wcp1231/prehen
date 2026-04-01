@@ -7,6 +7,7 @@ defmodule Prehen.Agents.Profile do
   defstruct [
     :name,
     :label,
+    :description,
     :implementation,
     :default_provider,
     :default_model,
@@ -23,6 +24,7 @@ defmodule Prehen.Agents.Profile do
   @type t :: %__MODULE__{
           name: String.t(),
           label: String.t() | nil,
+          description: String.t() | nil,
           implementation: String.t() | nil,
           default_provider: String.t() | nil,
           default_model: String.t() | nil,
@@ -60,4 +62,28 @@ defmodule Prehen.Agents.Profile do
     do: label
 
   def display_name(%__MODULE__{name: name}), do: name
+
+  def description(%__MODULE__{description: description}) when is_binary(description) do
+    case String.trim(description) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  def description(%__MODULE__{metadata: metadata}) when is_map(metadata) do
+    metadata
+    |> Map.get(:description, Map.get(metadata, "description"))
+    |> normalize_optional_string()
+  end
+
+  def description(_profile), do: nil
+
+  defp normalize_optional_string(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp normalize_optional_string(_value), do: nil
 end

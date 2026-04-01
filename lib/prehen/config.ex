@@ -174,6 +174,7 @@ defmodule Prehen.Config do
        %Profile{
          name: name,
          label: label,
+         description: normalize_optional_string(fetch_attr(attrs, :description)),
          implementation: implementation,
          default_provider: default_provider,
          default_model: default_model,

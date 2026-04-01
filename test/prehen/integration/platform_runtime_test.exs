@@ -54,7 +54,24 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
     conn = get(build_conn(), "/agents")
     assert agents = json_response(conn, 200)
 
-    assert agents["agents"] == [%{"agent" => "coder", "default" => true, "name" => "Coder"}]
+    assert agents["agents"] == [
+             %{
+               "agent" => "coder",
+               "default" => true,
+               "description" => "General coding profile",
+               "name" => "Coder"
+             }
+           ]
+  end
+
+  test "POST /sessions returns a structured error for an unknown profile name" do
+    conn = post(build_conn(), "/sessions", %{"agent" => "missing_profile"})
+
+    assert %{"error" => %{"type" => "unprocessable_entity", "message" => message}} =
+             json_response(conn, 422)
+
+    assert message =~ ":agent_profile_not_found"
+    assert message =~ "missing_profile"
   end
 
   test "GET /sessions/:id returns JSON-safe gateway status without worker pid" do
@@ -179,6 +196,7 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
       workspace_policy: %{mode: "scoped"},
       transport: :stdio
     }
+    |> Map.put(:description, "General coding profile")
   end
 
   defp fake_stdio_implementation do

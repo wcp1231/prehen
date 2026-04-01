@@ -34,13 +34,20 @@ defmodule Prehen.Integration.WebInboxTest do
     conn = get(build_conn(), "/agents")
 
     assert %{"agents" => agents} = json_response(conn, 200)
-    assert [%{"agent" => "coder", "name" => "Coder", "default" => true}] = agents
+    assert [
+             %{
+               "agent" => "coder",
+               "name" => "Coder",
+               "default" => true,
+               "description" => "General coding profile"
+             }
+           ] = agents
   end
 
-  test "default agent flag follows registry order rather than sorted response order" do
+  test "default agent flag follows supported registry order rather than sorted response order" do
     zebra = fake_profile("zebra", "Zebra")
     alpha = fake_profile("alpha", "Alpha")
-    set_registry([zebra, alpha], fake_implementations())
+    set_registry([zebra, alpha], fake_implementations(), ["zebra", "alpha"])
 
     conn = get(build_conn(), "/agents")
 
@@ -50,6 +57,16 @@ defmodule Prehen.Integration.WebInboxTest do
              %{"agent" => "alpha", "default" => false},
              %{"agent" => "zebra", "default" => true}
            ] = Enum.map(agents, &Map.take(&1, ["agent", "default"]))
+  end
+
+  test "GET /agents only exposes supported profiles" do
+    unsupported = fake_profile("unsupported", "Unsupported")
+    coder = fake_profile("coder", "Coder")
+    set_registry([unsupported, coder], fake_implementations(), ["coder"])
+
+    conn = get(build_conn(), "/agents")
+
+    assert %{"agents" => [%{"agent" => "coder", "default" => true}]} = json_response(conn, 200)
   end
 
   test "returns an empty agent list when no agents are configured" do
@@ -132,12 +149,26 @@ defmodule Prehen.Integration.WebInboxTest do
   end
 
   test "creates an inbox session with the default agent when agent is omitted" do
+    unsupported = fake_profile("unsupported", "Unsupported")
+    coder = fake_profile("coder", "Coder")
+    set_registry([unsupported, coder], fake_implementations(), ["coder"])
+
     conn = post(build_conn(), "/inbox/sessions", %{})
 
     assert %{"session_id" => session_id, "agent" => "coder", "status" => "attached"} =
              json_response(conn, 201)
 
     on_exit(fn -> cleanup_session(session_id) end)
+  end
+
+  test "returns a structured create failure when the requested profile name is unsupported" do
+    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "missing_profile"})
+
+    assert %{"error" => %{"type" => "unprocessable_entity", "message" => message}} =
+             json_response(conn, 422)
+
+    assert message =~ ":agent_profile_not_found"
+    assert message =~ "missing_profile"
   end
 
   test "stopping a retained inbox session is idempotent" do
@@ -167,7 +198,7 @@ defmodule Prehen.Integration.WebInboxTest do
       |> subscribe_and_join(PrehenWeb.SessionChannel, "session:#{session_id}")
 
     ref = push(socket, "submit", %{"text" => "hello"})
-    assert_reply(ref, :ok, %{"request_id" => request_id})
+    assert_reply(ref, :ok, %{"request_id" => request_id}, 1_000)
 
     assert_push("event", %{
       "type" => "session.output.delta",
@@ -259,6 +290,7 @@ defmodule Prehen.Integration.WebInboxTest do
       workspace_policy: %{mode: "scoped"},
       transport: :stdio
     }
+    |> Map.put(:description, description_for(name))
   end
 
   defp fake_implementations do
@@ -279,18 +311,27 @@ defmodule Prehen.Integration.WebInboxTest do
     }
   end
 
-  defp set_registry(profiles, implementations) do
+  defp set_registry(profiles, implementations, supported_names \\ nil) do
     registry_pid = Process.whereis(Registry)
+
+    supported_names = supported_names || Enum.map(profiles, & &1.name)
+    supported_profiles = Enum.filter(profiles, &(&1.name in supported_names))
 
     :sys.replace_state(registry_pid, fn _ ->
       %{
         ordered: profiles,
         by_name: Map.new(profiles, fn %Profile{name: name} = profile -> {name, profile} end),
+        supported_ordered: supported_profiles,
+        supported_by_name:
+          Map.new(supported_profiles, fn %Profile{name: name} = profile -> {name, profile} end),
         implementations_ordered: implementations,
         implementations_by_name: Map.new(implementations, fn impl -> {impl.name, impl} end)
       }
     end)
   end
+
+  defp description_for("coder"), do: "General coding profile"
+  defp description_for(name), do: "#{name} profile"
 
   defp wait_until(fun, attempts \\ 20)
 

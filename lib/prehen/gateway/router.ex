@@ -11,12 +11,10 @@ defmodule Prehen.Gateway.Router do
         route_default()
 
       name ->
-        try do
-          name
-          |> Registry.fetch!()
-          |> bind_implementation()
-        rescue
-          KeyError -> {:error, {:agent_profile_not_found, name}}
+        with {:ok, profile} <- Registry.fetch(name) do
+          bind_implementation(profile)
+        else
+          :error -> {:error, {:agent_profile_not_found, name}}
         end
     end
   end
@@ -33,10 +31,10 @@ defmodule Prehen.Gateway.Router do
 
   defp bind_implementation(%Profile{implementation: implementation} = profile)
        when is_binary(implementation) and implementation != "" do
-    try do
-      {:ok, Profile.bind_implementation(profile, Registry.fetch_implementation!(implementation))}
-    rescue
-      KeyError -> {:error, {:agent_implementation_not_found, implementation}}
+    with {:ok, bound_implementation} <- Registry.fetch_implementation(implementation) do
+      {:ok, Profile.bind_implementation(profile, bound_implementation)}
+    else
+      :error -> {:error, {:agent_implementation_not_found, implementation}}
     end
   end
 

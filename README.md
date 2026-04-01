@@ -51,6 +51,9 @@ For a one-shot CLI run through the same gateway session flow:
 mix prehen.run --agent coder "列出 lib 并读取 prehen.ex"
 ```
 
+`--agent` still uses the phase-1 wire name, but the value is a supported profile name such as `coder`.
+Prehen resolves that profile to an internal implementation and wrapper before starting the session.
+
 ## CLI Options
 
 ```text
@@ -93,6 +96,10 @@ config :prehen,
     }
   ]
 ```
+
+Users select from supported profiles exposed by `GET /agents`; profiles that fail wrapper support validation in the current environment are not listed or routable.
+Each profile carries the user-facing defaults for provider, model, prompt profile, and workspace policy, while Prehen maps the profile to its implementation internally.
+`provider` and `model` defaults live on the profile today and may be overridden per session now or through broader API surface later.
 
 The wrapper owns `cwd`, prompt payload, provider, model, and workspace env injection before the executable is opened.
 Set `PI_CODING_AGENT_BIN` only when you want the focused wrapper validation test to hit a concrete local executable:

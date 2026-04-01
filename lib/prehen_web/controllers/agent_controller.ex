@@ -16,9 +16,13 @@ defmodule PrehenWeb.AgentController do
           name: Profile.display_name(profile),
           default: profile.name == default_agent
         }
+        |> maybe_put_description(Profile.description(profile))
       end)
       |> Enum.sort_by(& &1.agent)
 
     json(conn, %{agents: agents})
   end
+
+  defp maybe_put_description(agent, nil), do: agent
+  defp maybe_put_description(agent, description), do: Map.put(agent, :description, description)
 end
