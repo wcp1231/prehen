@@ -140,6 +140,9 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
            runtime_session_config: runtime_session_config,
            status: :idle
        }}
+    else
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 

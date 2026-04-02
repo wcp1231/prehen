@@ -304,6 +304,35 @@ defmodule Prehen.Client.SurfaceTest do
     assert :ok = Surface.stop_session(session_id)
   end
 
+  test "create_session allocates a workspace when omitted", %{workspace: setup_workspace} do
+    assert {:ok, %{session_id: session_id, agent: "inspecting"}} =
+             Surface.create_session(agent: "inspecting", test_pid: self())
+
+    assert_receive {:wrapper_opened,
+                    %{
+                      profile_name: "inspecting",
+                      workspace: workspace,
+                      prompt: %{
+                        workspace: %{
+                          root_dir: workspace,
+                          policy: %{mode: "scoped"}
+                        }
+                      }
+                    }}
+
+    assert is_binary(workspace)
+    assert Path.type(workspace) == :absolute
+    assert workspace != setup_workspace
+    assert File.dir?(workspace)
+
+    assert {:ok, %{workspace: ^workspace, status: :attached}} = Surface.session_status(session_id)
+
+    on_exit(fn ->
+      :ok = Surface.stop_session(session_id)
+      File.rm_rf(workspace)
+    end)
+  end
+
   test "create_session allows slow wrapper startup through the real session worker path", %{
     workspace: workspace
   } do

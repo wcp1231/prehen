@@ -88,6 +88,24 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
     assert :ok = PiCodingAgent.stop(wrapper)
   end
 
+  test "open_session returns capability_failed instead of crashing the wrapper when workspace is missing" do
+    session_config =
+      session_config(nil, implementation: fake_pi_implementation())
+
+    assert {:ok, wrapper} = PiCodingAgent.start_link(session_config: session_config)
+
+    assert {:error, :capability_failed} =
+             PiCodingAgent.open_session(wrapper, %{
+               gateway_session_id: "gw_open_missing_workspace",
+               provider: "openai",
+               model: "gpt-5",
+               prompt_profile: "coder_default"
+             })
+
+    assert Process.alive?(wrapper)
+    assert :ok = PiCodingAgent.stop(wrapper)
+  end
+
   test "opens a synthetic session and maps pi text deltas into gateway frames" do
     workspace = tmp_workspace_path("native")
 

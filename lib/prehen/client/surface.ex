@@ -22,6 +22,7 @@ defmodule Prehen.Client.Surface do
   alias Prehen.Gateway.Router
   alias Prehen.Gateway.SessionRegistry
   alias Prehen.Gateway.SessionWorker
+  alias Prehen.Workspaces
 
   @doc """
   创建会话并返回客户端需要的最小标识信息。
@@ -285,7 +286,8 @@ defmodule Prehen.Client.Surface do
   defp normalize_session_id(session_id), do: to_string(session_id)
 
   defp resolve_session_config(%Profile{} = profile, opts) do
-    with {:ok, implementation} <- implementation_from_profile(profile) do
+    with {:ok, implementation} <- implementation_from_profile(profile),
+         {:ok, workspace} <- resolve_workspace(profile, opts) do
       {:ok,
        %SessionConfig{
          profile_name: profile.name,
@@ -296,8 +298,17 @@ defmodule Prehen.Client.Surface do
            normalize_optional_string(Keyword.get(opts, :prompt_profile)) || profile.prompt_profile,
          workspace_policy: profile.workspace_policy,
          implementation: implementation,
-         workspace: normalize_optional_string(Keyword.get(opts, :workspace))
+         workspace: workspace
        }}
+    end
+  end
+
+  defp resolve_workspace(%Profile{} = profile, opts) do
+    workspace = normalize_optional_string(Keyword.get(opts, :workspace))
+
+    case Workspaces.resolve(workspace, profile.name) do
+      {:ok, resolved_workspace} -> {:ok, resolved_workspace}
+      {:error, reason} -> {:error, {:workspace_unavailable, reason}}
     end
   end
 

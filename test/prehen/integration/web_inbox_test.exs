@@ -175,6 +175,24 @@ defmodule Prehen.Integration.WebInboxTest do
     on_exit(fn -> cleanup_session(session_id) end)
   end
 
+  test "creates an inbox session with an allocated workspace when workspace is omitted" do
+    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "coder"})
+
+    assert %{"session_id" => session_id, "agent" => "coder", "status" => "attached"} =
+             json_response(conn, 201)
+
+    conn = get(build_conn(), "/sessions/#{session_id}")
+    assert %{"session" => %{"workspace" => workspace}} = json_response(conn, 200)
+    assert is_binary(workspace)
+    assert Path.type(workspace) == :absolute
+    assert File.dir?(workspace)
+
+    on_exit(fn ->
+      cleanup_session(session_id)
+      File.rm_rf(workspace)
+    end)
+  end
+
   test "returns a structured create failure when the requested profile name is unsupported" do
     conn = post(build_conn(), "/inbox/sessions", %{"agent" => "missing_profile"})
 
