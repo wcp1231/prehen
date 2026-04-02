@@ -115,6 +115,30 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
     assert :ok = PiCodingAgent.support_check(session_config)
   end
 
+  test "support_check succeeds once a valid session header is observed" do
+    workspace = tmp_workspace_path("support_check_header_only")
+
+    implementation = %Implementation{
+      name: "pi_coding_agent",
+      command: python_command(),
+      args: [
+        "-u",
+        "-c",
+        "import json,sys; sys.stdout.write(json.dumps({'type':'session','id':'probe'}) + '\\n'); sys.stdout.flush(); sys.exit(17)"
+      ],
+      env: %{},
+      wrapper: PiCodingAgent
+    }
+
+    session_config =
+      session_config(workspace,
+        implementation: implementation,
+        prompt_context: "You are Prehen coder."
+      )
+
+    assert :ok = PiCodingAgent.support_check(session_config)
+  end
+
   test "support_check rejects a stream without a valid session header" do
     session_config =
       session_config(

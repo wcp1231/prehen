@@ -495,7 +495,7 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
              env: run_launch.env
            ) do
       try do
-        await_support_probe(host, %{buffer: "", header_seen?: false, completed?: false})
+        await_support_probe(host, %{buffer: "", header_seen?: false})
       after
         maybe_stop_host(host)
       end
@@ -508,19 +508,13 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
     receive do
       {:executable_host, ^host, {:stdout, data}} ->
         case consume_support_stdout(probe_state, data) do
+          :ok -> :ok
           {:ok, next_probe_state} -> await_support_probe(host, next_probe_state)
           {:error, reason} -> {:error, reason}
         end
 
       {:executable_host, ^host, {:stderr, _data}} ->
         await_support_probe(host, probe_state)
-
-      {:executable_host, ^host, {:exit_status, 0}} ->
-        if probe_state.header_seen? and probe_state.completed? do
-          :ok
-        else
-          {:error, :contract_failed}
-        end
 
       {:executable_host, ^host, {:exit_status, _status}} ->
         {:error, :contract_failed}
@@ -539,6 +533,7 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
 
     Enum.reduce_while(lines, {:ok, %{probe_state | buffer: rest}}, fn line, {:ok, acc} ->
       case consume_support_line(acc, line) do
+        :ok -> {:halt, :ok}
         {:ok, next_acc} -> {:cont, {:ok, next_acc}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
@@ -555,23 +550,14 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
       not probe_state.header_seen? ->
         case Jason.decode(trimmed) do
           {:ok, %{"type" => "session"}} ->
-            {:ok, %{probe_state | header_seen?: true}}
+            :ok
 
           _other ->
             {:error, :contract_failed}
         end
 
       true ->
-        case Jason.decode(trimmed) do
-          {:ok, %{"type" => "agent_end"}} ->
-            {:ok, %{probe_state | completed?: true}}
-
-          {:ok, _event} ->
-            {:ok, probe_state}
-
-          {:error, _reason} ->
-            {:error, :contract_failed}
-        end
+        {:ok, probe_state}
     end
   end
 
