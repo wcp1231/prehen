@@ -15,3 +15,25 @@ if config_env() == :prod do
     secret_key_base: secret_key_base,
     server: true
 end
+
+config :prehen,
+  agent_profiles: [
+    %{
+      name: "coder",
+      label: "Coder",
+      implementation: "pi_coding_agent",
+      default_provider: "github-copilot",
+      default_model: "gpt-5.4-mini",
+      prompt_profile: "coder_default",
+      workspace_policy: %{mode: "scoped"}
+    }
+  ],
+  agent_implementations: [
+    %{
+      name: "pi_coding_agent",
+      command: System.get_env("PI_CODING_AGENT_BIN") || "pi",
+      args: ["--mode", "json"],
+      env: %{},
+      wrapper: Prehen.Agents.Wrappers.PiCodingAgent
+    }
+  ]

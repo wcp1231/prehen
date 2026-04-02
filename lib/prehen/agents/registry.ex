@@ -2,6 +2,7 @@ defmodule Prehen.Agents.Registry do
   @moduledoc false
 
   use GenServer
+  require Logger
 
   alias Prehen.Agents.Implementation
   alias Prehen.Agents.Profile
@@ -55,7 +56,18 @@ defmodule Prehen.Agents.Registry do
       end)
 
     supported_profiles =
-      Enum.filter(profiles, &supported_profile?(&1, implementations_by_name))
+      profiles
+      |> Enum.reduce([], fn profile, acc ->
+        case supported_profile(profile, implementations_by_name) do
+          {:ok, supported_profile} ->
+            [supported_profile | acc]
+
+          {:error, reason} ->
+            log_unsupported_profile(profile, reason)
+            acc
+        end
+      end)
+      |> Enum.reverse()
 
     %{
       ordered: profiles,
@@ -68,18 +80,30 @@ defmodule Prehen.Agents.Registry do
     }
   end
 
-  defp supported_profile?(%Profile{} = profile, implementations_by_name) do
+  defp supported_profile(%Profile{} = profile, implementations_by_name) do
     with {:ok, implementation} <- implementation_for_profile(profile, implementations_by_name),
          {:ok, wrapper} <- wrapper_module(implementation),
-         true <- function_exported?(wrapper, :support_check, 1),
+         :ok <- export_support_check(wrapper),
          :ok <- wrapper.support_check(support_check_session_config(profile, implementation)) do
-      true
-    else
-      _ -> false
+      {:ok, profile}
     end
   end
 
-  defp supported_profile?(_profile, _implementations_by_name), do: false
+  defp supported_profile(_profile, _implementations_by_name), do: {:error, :invalid_profile}
+
+  defp export_support_check(wrapper) do
+    case Code.ensure_loaded(wrapper) do
+      {:module, ^wrapper} ->
+        if function_exported?(wrapper, :support_check, 1) do
+          :ok
+        else
+          {:error, :missing_support_check}
+        end
+
+      {:error, reason} ->
+        {:error, {:wrapper_unavailable, reason}}
+    end
+  end
 
   defp implementation_for_profile(
          %Profile{implementation: implementation_name},
@@ -144,6 +168,23 @@ defmodule Prehen.Agents.Registry do
     do: Map.new(env, fn {key, value} -> {to_string(key), to_string(value)} end)
 
   defp normalize_env(_env), do: %{}
+
+  defp log_unsupported_profile(%Profile{name: name}, reason) do
+    Logger.warning(fn ->
+      "agent profile #{inspect(name)} filtered out during support check: " <>
+        format_rejection_reason(reason)
+    end)
+  end
+
+  defp log_unsupported_profile(profile, reason) do
+    Logger.warning(fn ->
+      "agent profile #{inspect(profile)} filtered out during support check: " <>
+        format_rejection_reason(reason)
+    end)
+  end
+
+  defp format_rejection_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp format_rejection_reason(reason), do: inspect(reason)
 
   defp supported_ordered(state), do: Map.get(state, :supported_ordered, state.ordered)
   defp supported_by_name(state), do: Map.get(state, :supported_by_name, state.by_name)

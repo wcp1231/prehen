@@ -1,36 +1,39 @@
 defmodule Prehen.Integration.PlatformRuntimeTest do
   use ExUnit.Case, async: false
 
-  alias Prehen.Agents.Profile
-  alias Prehen.Agents.Registry
+  import Phoenix.ConnTest
+
   alias Prehen.Client.Surface
   alias Prehen.Gateway.InboxProjection
-  import Phoenix.ConnTest
+  alias Prehen.TestSupport.PiAgentFixture
 
   @endpoint PrehenWeb.Endpoint
 
   setup do
     InboxProjection.reset()
-    registry_pid = Process.whereis(Registry)
-    original = :sys.get_state(registry_pid)
 
-    set_registry([coder_profile()], [fake_stdio_implementation()])
+    original =
+      PiAgentFixture.replace_registry!(
+        PiAgentFixture.registry_state([coder_profile()], [coder_implementation()])
+      )
+
+    workspace = PiAgentFixture.workspace!("platform_runtime")
 
     on_exit(fn ->
-      :sys.replace_state(registry_pid, fn _state -> original end)
+      PiAgentFixture.restore_registry!(original)
+      File.rm_rf(workspace)
     end)
 
-    :ok
+    {:ok, workspace: workspace}
   end
 
-  test "control plane HTTP endpoints route through gateway sessions" do
-    conn = build_conn()
-
+  test "control plane HTTP endpoints route through gateway sessions", %{workspace: workspace} do
     conn =
-      post(conn, "/sessions", %{
+      post(build_conn(), "/sessions", %{
         "agent" => "coder",
         "provider" => "anthropic",
-        "model" => "claude-sonnet"
+        "model" => "claude-sonnet",
+        "workspace" => workspace
       })
 
     assert created = json_response(conn, 201)
@@ -83,11 +86,13 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
              json_response(conn, 422)
 
     assert message =~ ":agent_implementation_not_found"
-    assert message =~ "fake_stdio_impl"
+    assert message =~ "coder_impl"
   end
 
-  test "GET /sessions/:id returns JSON-safe gateway status without worker pid" do
-    conn = post(build_conn(), "/sessions", %{"agent" => "coder"})
+  test "GET /sessions/:id returns JSON-safe gateway status without worker pid", %{
+    workspace: workspace
+  } do
+    conn = post(build_conn(), "/sessions", %{"agent" => "coder", "workspace" => workspace})
     assert %{"session_id" => session_id} = json_response(conn, 201)
 
     on_exit(fn -> Surface.stop_session(session_id) end)
@@ -100,8 +105,8 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
     refute Map.has_key?(session, "worker_pid")
   end
 
-  test "GET /sessions/:id omits worker_pid after retained terminal stop" do
-    conn = post(build_conn(), "/sessions", %{"agent" => "coder"})
+  test "GET /sessions/:id omits worker_pid after retained terminal stop", %{workspace: workspace} do
+    conn = post(build_conn(), "/sessions", %{"agent" => "coder", "workspace" => workspace})
     assert %{"session_id" => session_id} = json_response(conn, 201)
 
     assert :ok = Surface.stop_session(session_id)
@@ -115,8 +120,10 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
     assert {:error, :not_found} = Prehen.Gateway.SessionRegistry.fetch_worker(session_id)
   end
 
-  test "POST /sessions/:id/messages returns 400 when message text is missing" do
-    conn = post(build_conn(), "/sessions", %{"agent" => "coder"})
+  test "POST /sessions/:id/messages returns 400 when message text is missing", %{
+    workspace: workspace
+  } do
+    conn = post(build_conn(), "/sessions", %{"agent" => "coder", "workspace" => workspace})
     assert %{"session_id" => session_id} = json_response(conn, 201)
 
     on_exit(fn -> Surface.stop_session(session_id) end)
@@ -130,14 +137,13 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
     assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
   end
 
-  test "records gateway lifecycle events for a session run" do
+  test "records gateway lifecycle events for a session run", %{workspace: workspace} do
     assert {:ok, %{session_id: gateway_session_id}} =
-             Prehen.Client.Surface.create_session(agent: "coder")
+             Surface.create_session(agent: "coder", workspace: workspace)
 
     on_exit(fn -> Surface.stop_session(gateway_session_id) end)
 
-    assert {:ok, _submit} =
-             Prehen.Client.Surface.submit_message(gateway_session_id, "hello trace")
+    assert {:ok, _submit} = Surface.submit_message(gateway_session_id, "hello trace")
 
     Process.sleep(100)
 
@@ -145,8 +151,9 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
     assert Enum.any?(events, &(&1.type == "agent.started"))
   end
 
-  test "projects live status transitions and retains history after stop" do
-    assert {:ok, %{session_id: session_id}} = Surface.create_session(agent: "coder")
+  test "projects live status transitions and retains history after stop", %{workspace: workspace} do
+    assert {:ok, %{session_id: session_id}} =
+             Surface.create_session(agent: "coder", workspace: workspace)
 
     assert {:ok, row} = InboxProjection.fetch_session(session_id)
     assert row.status == :attached
@@ -161,7 +168,7 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
                end
              end)
 
-    assert row.preview == "hi"
+    assert row.preview == "echo:hello inbox"
 
     assert :ok = Surface.stop_session(session_id)
 
@@ -179,7 +186,7 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
 
     assert Enum.map(history, &Map.take(&1, [:kind, :message_id, :text])) == [
              %{kind: :user_message, message_id: request_id, text: "hello inbox"},
-             %{kind: :assistant_message, message_id: request_id, text: "hi"}
+             %{kind: :assistant_message, message_id: request_id, text: "echo:hello inbox"}
            ]
   end
 
@@ -198,40 +205,10 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
 
   defp wait_until(_fun, 0), do: {:error, :timeout}
 
-  defp coder_profile do
-    %Profile{
-      name: "coder",
-      label: "Coder",
-      implementation: "fake_stdio_impl",
-      default_provider: "openai",
-      default_model: "gpt-5",
-      prompt_profile: "coder_default",
-      workspace_policy: %{mode: "scoped"},
-      transport: :stdio
-    }
-    |> Map.put(:description, "General coding profile")
-  end
-
-  defp fake_stdio_implementation do
-    %{
-      name: "fake_stdio_impl",
-      command: "mix",
-      args: ["run", "--no-start", "test/support/fake_wrapper_agent.exs"],
-      env: %{},
-      wrapper: Prehen.Agents.Wrappers.Passthrough
-    }
-  end
+  defp coder_profile, do: PiAgentFixture.profile("coder")
+  defp coder_implementation, do: PiAgentFixture.implementation("coder")
 
   defp set_registry(profiles, implementations) do
-    registry_pid = Process.whereis(Registry)
-
-    :sys.replace_state(registry_pid, fn _state ->
-      %{
-        ordered: profiles,
-        by_name: Map.new(profiles, fn %Profile{name: name} = profile -> {name, profile} end),
-        implementations_ordered: implementations,
-        implementations_by_name: Map.new(implementations, fn impl -> {impl.name, impl} end)
-      }
-    end)
+    PiAgentFixture.replace_registry!(PiAgentFixture.registry_state(profiles, implementations))
   end
 end

@@ -4,11 +4,12 @@ Prehen is a local-first Agent Gateway and control plane built with Elixir and OT
 
 It no longer tries to host a generic in-process agent runtime. Instead:
 
-- external local agent processes own session truth and execution semantics
-- one session maps to one local agent process
+- external local agent processes own execution semantics
+- one gateway session maps to one wrapper-owned agent session
+- each submitted turn launches a local `pi --mode json` process
 - Prehen handles routing, process supervision, and event forwarding
 - HTTP and Phoenix Channels are the primary control/event surface
-- the first supported transport is `stdio + JSON Lines`
+- the first supported real coding agent is `pi` through `Prehen.Agents.Wrappers.PiCodingAgent`
 
 ## MVP Scope
 
@@ -21,7 +22,7 @@ Included in the current MVP:
 - `/inbox/sessions` JSON endpoints for create/list/detail/history/stop
 - `channel: session:<gateway_session_id>` for real-time events
 - gateway-backed CLI `run/2`
-- ACP-inspired internal frames over a transport adapter
+- normalized `session.output.*` frames from the Pi-native wrapper path
 
 Not included in the MVP:
 
@@ -71,7 +72,7 @@ The gateway now only reads a small runtime config surface:
 
 There is no longer a built-in structured config loader for providers, secrets, runtime templates, or workspace layout.
 
-Example profile + implementation wiring for `pi-coding-agent`:
+Example profile + implementation wiring for the Pi-native wrapper:
 
 ```elixir
 config :prehen,
@@ -89,7 +90,7 @@ config :prehen,
   agent_implementations: [
     %{
       name: "pi_coding_agent",
-      command: System.get_env("PI_CODING_AGENT_BIN") || "pi-coding-agent",
+      command: System.get_env("PI_CODING_AGENT_BIN") || "pi",
       args: [],
       env: %{},
       wrapper: Prehen.Agents.Wrappers.PiCodingAgent
@@ -101,12 +102,12 @@ Users select from supported profiles exposed by `GET /agents`; profiles that fai
 Each profile carries the user-facing defaults for provider, model, prompt profile, and workspace policy, while Prehen maps the profile to its implementation internally.
 `provider` and `model` defaults live on the profile today and may be overridden per session now or through broader API surface later.
 
-The wrapper owns `cwd`, prompt payload, provider, model, and workspace env injection before the executable is opened.
-Set `PI_CODING_AGENT_BIN` only when you want the focused wrapper validation test to hit a concrete local executable:
-the opt-in test is a smoke path that verifies wrapper startup, session open, one message round-trip, and stop behavior against the configured binary.
+`PiCodingAgent` owns `cwd`, prompt payload, provider, model, and workspace env injection, then uses `Prehen.Agents.Wrappers.ExecutableHost` to launch `pi --mode json` for each turn.
+Set `PI_CODING_AGENT_BIN` when you want the focused wrapper validation test to hit a concrete local `pi` executable:
+the opt-in smoke path verifies wrapper startup, synthetic session open, one message round-trip, and stop behavior against the configured binary.
 
 ```bash
-PI_CODING_AGENT_BIN=/abs/path/to/pi-coding-agent mix test test/prehen/agents/wrappers/pi_coding_agent_test.exs
+PI_CODING_AGENT_BIN=pi mix test test/prehen/agents/wrappers/pi_coding_agent_test.exs
 ```
 
 ## Manual Validation Checklist
@@ -129,7 +130,7 @@ config :prehen,
   agent_implementations: [
     %{
       name: "pi_coding_agent",
-      command: System.get_env("PI_CODING_AGENT_BIN") || "pi-coding-agent",
+      command: System.get_env("PI_CODING_AGENT_BIN") || "pi",
       args: [],
       env: %{},
       wrapper: Prehen.Agents.Wrappers.PiCodingAgent
@@ -137,17 +138,25 @@ config :prehen,
   ]
 ```
 
-2. Point Prehen at `pi-coding-agent` and boot the gateway:
+2. Point Prehen at `pi` and boot the gateway:
 
 ```bash
-export PI_CODING_AGENT_BIN=/abs/path/to/pi-coding-agent
+export PI_CODING_AGENT_BIN=pi
 mix prehen.server
 ```
 
-3. Verify one real conversation through `/inbox`:
-   Open `http://localhost:4000/inbox`, create a `coder` session, send a short prompt such as `reply with the word ok`, and confirm the session row appears, the assistant reply streams into history, and stopping the session leaves the row readable but no longer writable.
+3. Verify the profile is exposed and routable:
 
-4. Reject unsupported integrations when any of these are true:
+```bash
+curl http://localhost:4000/agents
+```
+
+Confirm the response includes `coder`.
+
+4. Verify one real conversation through `/inbox`:
+   Open `http://localhost:4000/inbox`, create a `coder` session, send a short prompt such as `reply with ok`, and confirm the assistant output streams into history and stopping the session leaves the row readable but no longer writable.
+
+5. Reject unsupported integrations when any of these are true:
    The profile does not appear in `GET /agents` or the `/inbox` agent picker, create returns `422` with a classified reason such as `:agent_profile_not_found` or `:agent_implementation_not_found`, or the focused wrapper smoke test returns a classified failure such as `:launch_failed`, `:contract_failed`, `:capability_failed`, or `:policy_rejected`.
 
 ## Gateway Surface
@@ -181,7 +190,7 @@ Gateway events use a stable envelope with:
 - `payload`
 - `metadata`
 
-The transport adapter is ACP-inspired internally, but the external control surface remains Prehen-specific.
+The external control surface remains Prehen-specific, while the active runtime path normalizes native `pi --mode json` output into that stable envelope.
 
 ## Architecture Docs
 

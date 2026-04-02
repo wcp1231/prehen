@@ -7,7 +7,8 @@ defmodule Prehen.Agents.Wrappers.ExecutableHost do
   @type command_spec :: %{
           required(:command) => String.t(),
           optional(:args) => [String.t()],
-          optional(:env) => map()
+          optional(:env) => map(),
+          optional(:close_stdin_after_bootstrap) => boolean()
         }
 
   def start_link(opts) do
@@ -43,12 +44,14 @@ defmodule Prehen.Agents.Wrappers.ExecutableHost do
     command = Keyword.fetch!(opts, :command)
     args = Keyword.get(opts, :args, [])
     env = Keyword.get(opts, :env, %{})
+    close_stdin_after_bootstrap = Keyword.get(opts, :close_stdin_after_bootstrap, false)
 
     with {:ok, executable} <- resolve_command(command),
          {:ok, relay_executable} <- resolve_command("python3"),
          :ok <- ensure_relay_script(),
          {:ok, port} <- open_port(relay_executable, relay_args(), %{}),
-         :ok <- write_bootstrap(port, executable, args, env) do
+         :ok <-
+           write_bootstrap(port, executable, args, env, close_stdin_after_bootstrap) do
       {:ok, %{owner: owner, port: port, buffer: "", exit_reported?: false}}
     else
       {:bootstrap_error, reason} ->
@@ -207,9 +210,12 @@ defmodule Prehen.Agents.Wrappers.ExecutableHost do
     if File.regular?(relay_script_path()), do: :ok, else: :error
   end
 
-  defp write_bootstrap(port, command, args, env) do
+  defp write_bootstrap(port, command, args, env, close_stdin_after_bootstrap) do
     payload =
-      %{type: "bootstrap", config: bootstrap_config(command, args, env)}
+      %{
+        type: "bootstrap",
+        config: bootstrap_config(command, args, env, close_stdin_after_bootstrap)
+      }
       |> Jason.encode_to_iodata!()
 
     case Port.command(port, encode_frame(payload)) do
@@ -220,11 +226,12 @@ defmodule Prehen.Agents.Wrappers.ExecutableHost do
     error -> {:bootstrap_error, error}
   end
 
-  defp bootstrap_config(command, args, env) do
+  defp bootstrap_config(command, args, env, close_stdin_after_bootstrap) do
     %{
       command: command,
       args: Enum.map(args, &to_string/1),
-      env: normalize_env_map(env)
+      env: normalize_env_map(env),
+      close_stdin_after_bootstrap: close_stdin_after_bootstrap
     }
   end
 

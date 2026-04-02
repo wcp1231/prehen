@@ -2,12 +2,12 @@ defmodule Prehen.Gateway.SessionWorkerTest do
   use ExUnit.Case, async: false
 
   alias Prehen.Agents.Envelope
-  alias Prehen.Agents.Implementation
   alias Prehen.Agents.SessionConfig
   alias Prehen.Agents.Wrapper
   alias Prehen.Gateway.InboxProjection
   alias Prehen.Gateway.SessionRegistry
   alias Prehen.Gateway.SessionWorker
+  alias Prehen.TestSupport.PiAgentFixture
 
   defmodule BrokenOpenWrapper do
     use GenServer
@@ -51,21 +51,25 @@ defmodule Prehen.Gateway.SessionWorkerTest do
   setup do
     previous_trap_exit = Process.flag(:trap_exit, true)
     InboxProjection.reset()
+    workspace = PiAgentFixture.workspace!("session_worker")
 
     on_exit(fn ->
       Process.flag(:trap_exit, previous_trap_exit)
       InboxProjection.reset()
+      File.rm_rf(workspace)
     end)
 
-    :ok
+    {:ok, workspace: workspace}
   end
 
-  test "forwards normalized output delta events through registry inbox projection and pubsub" do
+  test "forwards normalized output delta events through registry inbox projection and pubsub", %{
+    workspace: workspace
+  } do
     Phoenix.PubSub.subscribe(Prehen.PubSub, "session:gw_1")
 
     assert {:ok, %{worker_pid: pid, gateway_session_id: "gw_1"}} =
              SessionWorker.start_session(
-               session_config(),
+               session_config(workspace),
                gateway_session_id: "gw_1",
                test_pid: self()
              )
@@ -85,34 +89,33 @@ defmodule Prehen.Gateway.SessionWorkerTest do
 
     assert {:ok,
             %{
-              agent_name: "fake_stdio",
+              agent_name: "coder",
               provider: "openai",
               model: "gpt-5",
-              prompt_profile: "fake_default",
+              prompt_profile: "coder_default",
               status: :running,
               agent_session_id: agent_session_id
             }} = SessionRegistry.fetch("gw_1")
 
     assert is_binary(agent_session_id)
 
-    assert_receive {:gateway_event, event}
+    assert_receive {:gateway_event, event}, 1_000
     assert event.type == "session.output.delta"
     assert event.gateway_session_id == "gw_1"
     assert event.agent_session_id == agent_session_id
-    assert event.agent == "fake_stdio"
+    assert event.agent == "coder"
     assert event.seq == 1
 
     assert event.payload == %{
-             "agent_session_id" => agent_session_id,
              "message_id" => "msg_1",
-             "text" => "hi"
+             "text" => "echo:hi"
            }
 
-    assert_receive {:gateway_event, pubsub_event}
+    assert_receive {:gateway_event, pubsub_event}, 1_000
     assert pubsub_event.type == "session.output.delta"
     assert pubsub_event.gateway_session_id == "gw_1"
 
-    assert {:ok, %{status: :idle, agent_name: "fake_stdio"}} =
+    assert {:ok, %{status: :idle, agent_name: "coder"}} =
              wait_until(fn ->
                case InboxProjection.fetch_session("gw_1") do
                  {:ok, %{status: :idle} = row} -> {:ok, row}
@@ -124,7 +127,7 @@ defmodule Prehen.Gateway.SessionWorkerTest do
 
     assert Enum.map(history, &Map.take(&1, [:kind, :message_id, :text])) == [
              %{kind: :user_message, message_id: "msg_1", text: "hi"},
-             %{kind: :assistant_message, message_id: "msg_1", text: "hi"}
+             %{kind: :assistant_message, message_id: "msg_1", text: "echo:hi"}
            ]
   end
 
@@ -133,7 +136,7 @@ defmodule Prehen.Gateway.SessionWorkerTest do
       Envelope.build("session.output.delta", %{
         gateway_session_id: "gw_2",
         agent_session_id: "agent_gw_2",
-        agent: "fake_stdio",
+        agent: "coder",
         seq: 1,
         payload: nil,
         metadata: nil
@@ -143,11 +146,12 @@ defmodule Prehen.Gateway.SessionWorkerTest do
     assert event.metadata == %{}
   end
 
-  test "retains terminal registry metadata when wrapper startup fails" do
+  test "retains terminal registry metadata when wrapper startup fails", %{workspace: workspace} do
     assert {:error, :open_failed} =
              SessionWorker.start_session(
                session_config(
-                 profile_name: "broken_stdio",
+                 workspace,
+                 profile_name: "broken_coder",
                  implementation:
                    implementation(
                      name: "broken_impl",
@@ -167,18 +171,20 @@ defmodule Prehen.Gateway.SessionWorkerTest do
     assert {:ok, session} = SessionRegistry.fetch("gw_broken")
     assert session.status == :crashed
     assert session.worker_pid == nil
-    assert session.agent_name == "broken_stdio"
+    assert session.agent_name == "broken_coder"
     assert session.provider == "openai"
     assert session.model == "gpt-5"
-    assert session.prompt_profile == "fake_default"
-    assert session.workspace == "/tmp/prehen_worker_test"
+    assert session.prompt_profile == "coder_default"
+    assert session.workspace == workspace
     refute Map.has_key?(session, :agent_session_id)
   end
 
-  test "normal stop removes the live worker route while retaining terminal metadata" do
+  test "normal stop removes the live worker route while retaining terminal metadata", %{
+    workspace: workspace
+  } do
     assert {:ok, %{worker_pid: pid, gateway_session_id: "gw_stop"}} =
              SessionWorker.start_session(
-               session_config(),
+               session_config(workspace),
                gateway_session_id: "gw_stop",
                test_pid: self()
              )
@@ -197,33 +203,27 @@ defmodule Prehen.Gateway.SessionWorkerTest do
                end
              end)
 
-    assert session.agent_name == "fake_stdio"
+    assert session.agent_name == "coder"
     assert is_binary(session.agent_session_id)
     assert {:error, :not_found} = SessionRegistry.fetch_worker("gw_stop")
   end
 
-  defp session_config(overrides \\ []) do
+  defp session_config(workspace, overrides \\ []) do
     base = %SessionConfig{
-      profile_name: "fake_stdio",
+      profile_name: "coder",
       provider: "openai",
       model: "gpt-5",
-      prompt_profile: "fake_default",
+      prompt_profile: "coder_default",
       workspace_policy: %{mode: "scoped"},
       implementation: implementation(),
-      workspace: "/tmp/prehen_worker_test"
+      workspace: workspace
     }
 
     struct!(base, Enum.into(overrides, %{}))
   end
 
   defp implementation(overrides \\ []) do
-    base = %Implementation{
-      name: "fake_stdio_impl",
-      command: "mix",
-      args: ["run", "--no-start", "test/support/fake_wrapper_agent.exs"],
-      env: %{},
-      wrapper: Prehen.Agents.Wrappers.Passthrough
-    }
+    base = PiAgentFixture.implementation("coder", %{}, name: "coder_impl")
 
     struct!(base, Enum.into(overrides, %{}))
   end

@@ -98,10 +98,18 @@ def main():
         return
 
     selector = selectors.DefaultSelector()
-    selector.register(stdin_fd, selectors.EVENT_READ, "stdin")
     selector.register(PROCESS.stdout, selectors.EVENT_READ, "stdout")
     selector.register(PROCESS.stderr, selectors.EVENT_READ, "stderr")
     open_streams = {"stdout", "stderr"}
+    close_stdin_after_bootstrap = bool(config.get("close_stdin_after_bootstrap"))
+
+    if close_stdin_after_bootstrap:
+        try:
+            PROCESS.stdin.close()
+        except OSError:
+            pass
+    else:
+        selector.register(stdin_fd, selectors.EVENT_READ, "stdin")
 
     while True:
         if PROCESS.poll() is not None and not open_streams:

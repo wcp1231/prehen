@@ -1,17 +1,17 @@
 # Prehen Current Architecture (As-Is)
 
-_Last updated: 2026-04-01_
+_Last updated: 2026-04-02_
 
 This document describes the current single-node gateway architecture as implemented today.
 
 Prehen is now a local-first Agent Gateway and control plane:
 
 - external local agent processes own session truth and execution semantics
-- one gateway session maps to one local agent process
+- one gateway session maps to one wrapper-owned agent session
 - users select supported agent profiles, not raw executable implementations
 - HTTP and Phoenix Channels are the primary client surface
 - `/inbox` is the operator-facing browser entrypoint on the local node
-- the first supported transport is `stdio + JSON Lines`
+- the active coding-agent path is `PiCodingAgent` launching `pi --mode json`
 - retained inbox rows and history are in-memory only on the current node
 
 ## 1. Layer Overview
@@ -22,9 +22,11 @@ The current hot path is:
 2. `Prehen.Client.Surface`
 3. `Prehen.Gateway.Router`
 4. `Prehen.Gateway.SessionWorker`
-5. `Prehen.Agents.Wrapper` implementation
-6. `Prehen.Agents.Transports.Stdio` or another wrapper-owned host path
-7. `PrehenWeb` HTTP controllers and `PrehenWeb.SessionChannel`
+5. `Prehen.Agents.Wrapper` behaviour boundary
+6. `Prehen.Agents.Wrappers.PiCodingAgent`
+7. `Prehen.Agents.Wrappers.ExecutableHost`
+8. local `pi --mode json`
+9. `PrehenWeb` HTTP controllers and `PrehenWeb.SessionChannel`
 
 The gateway also keeps a small in-memory trace collector for gateway events only.
 
@@ -47,11 +49,11 @@ Prehen.Gateway.SessionWorker
     |
     +--> Prehen.Gateway.SessionRegistry
     +--> Prehen.Observability.TraceCollector
-    +--> wrapper
+    +--> Prehen.Agents.Wrappers.PiCodingAgent
              |
-             +--> transport adapter / executable host
+             +--> Prehen.Agents.Wrappers.ExecutableHost
                       |
-                      +--> local external agent process
+                      +--> local `pi --mode json` process
 ```
 
 The inbox UI, inbox JSON endpoints, session registry, and retained history all operate against node-local in-memory state. There is no durable recovery or cross-node visibility.
@@ -92,7 +94,7 @@ The inbox UI, inbox JSON endpoints, session registry, and retained history all o
 - one worker per gateway session
 - starts the configured wrapper
 - passes provider, model, workspace, and prompt context into wrapper startup
-- opens the external local agent process
+- attaches the gateway session to the wrapper-owned agent session
 - records and broadcasts normalized gateway events
 - owns the attachment between `gateway_session_id` and `agent_session_id`
 
@@ -116,14 +118,20 @@ The inbox UI, inbox JSON endpoints, session registry, and retained history all o
 - is rebuilt from live events only during the current node lifetime
 - keeps stopped sessions readable after stop, but only until restart
 
-### 2.9 `Prehen.Agents.Transports.Stdio`
+### 2.9 `Prehen.Agents.Wrappers.PiCodingAgent`
 
-- concrete `stdio + JSON Lines` transport
-- starts the agent child process when selected by a wrapper such as passthrough or `pi-coding-agent`
-- sends and receives JSON frames
-- treats `stderr` as diagnostics
+- active wrapper implementation for supported coding-agent profiles
+- owns session-local state, synthetic `agent_session_id`, and retained conversation context
+- validates workspace policy and launch requirements before a session is attached
+- launches one `pi` run per submitted turn and normalizes native JSON events into gateway frames
 
-### 2.10 `PrehenWeb`
+### 2.10 `Prehen.Agents.Wrappers.ExecutableHost`
+
+- generic child-process host used by the wrapper
+- resolves the executable path, launches the child process, and relays stdout, stderr, and exit status
+- keeps process hosting separate from wrapper state management
+
+### 2.11 `PrehenWeb`
 
 - HTTP controllers expose supported profiles through `GET /agents`
 - session create surfaces continue to use the `agent` wire field, but its value is now a supported profile name
@@ -141,19 +149,19 @@ The inbox UI, inbox JSON endpoints, session registry, and retained history all o
 3. The router resolves that profile to its internal implementation.
 4. `SessionWorker` is started for that session.
 5. The worker builds prompt context and starts the configured wrapper.
-6. The wrapper injects provider, model, workspace, and prompt payload before opening the local agent process.
-7. The agent returns `agent_session_id`.
-8. `SessionRegistry` stores the route binding.
-9. `InboxProjection` records a node-local session row for `/inbox`.
+6. `PiCodingAgent` validates the session config and mints a synthetic `agent_session_id` without launching `pi` yet.
+7. `SessionRegistry` stores the route binding.
+8. `InboxProjection` records a node-local session row for `/inbox`.
 
 ### 3.2 Message Submission
 
 1. Client submits a message through HTTP `POST /sessions/:id/messages`, SessionChannel, or `Prehen.submit_message/3`.
 2. `Surface.submit_message/3` looks up the worker by `gateway_session_id`.
-3. The worker forwards a `session.message` frame to the agent process.
-4. The agent returns `session.output.delta` or other session events.
-5. The worker normalizes the event, records it, and broadcasts it on PubSub.
-6. `InboxProjection` appends retained history for the current node lifetime.
+3. The worker forwards the submit payload to `PiCodingAgent`.
+4. `PiCodingAgent` launches a per-turn `pi --mode json` child process through `ExecutableHost`.
+5. Native `pi` JSON lines are parsed and normalized into `session.output.delta`, `session.output.completed`, or `session.error`.
+6. The worker records the normalized event and broadcasts it on PubSub.
+7. `InboxProjection` appends retained history for the current node lifetime.
 
 ### 3.3 Channel Streaming
 
@@ -180,7 +188,8 @@ The inbox UI, inbox JSON endpoints, session registry, and retained history all o
 ## 4. Current Constraints
 
 - single node only
-- one session maps to one local agent process
+- one session maps to one wrapper-owned agent session
+- one in-flight turn per session
 - only profiles that pass wrapper support validation are exposed to users
 - unsupported or misconfigured implementations are rejected with classified wrapper or routing errors
 - no persistent session recovery

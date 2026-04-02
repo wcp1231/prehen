@@ -1,9 +1,20 @@
 defmodule PrehenWeb.SessionChannelTest do
   use PrehenWeb.ChannelCase, async: false
 
-  alias Prehen.Agents.Implementation
-  alias Prehen.Agents.Profile
   alias Prehen.Gateway.SessionRegistry
+  alias Prehen.TestSupport.PiAgentFixture
+
+  setup do
+    original = PiAgentFixture.replace_registry!(PiAgentFixture.registry_state("coder"))
+    workspace = PiAgentFixture.workspace!("session_channel")
+
+    on_exit(fn ->
+      PiAgentFixture.restore_registry!(original)
+      File.rm_rf(workspace)
+    end)
+
+    {:ok, workspace: workspace}
+  end
 
   test "forwards gateway envelopes as event pushes on handle_info" do
     socket =
@@ -17,7 +28,7 @@ defmodule PrehenWeb.SessionChannelTest do
       "type" => "session.output.delta",
       "gateway_session_id" => "gw_1",
       "agent_session_id" => "agent_gw_1",
-      "agent" => "fake_stdio",
+      "agent" => "coder",
       "node" => "nonode@nohost",
       "seq" => 1,
       "timestamp" => 1_000,
@@ -30,11 +41,11 @@ defmodule PrehenWeb.SessionChannelTest do
 
     assert returned_socket.assigns.session_id == "gw_1"
 
-    assert_push "event", %{
+    assert_push("event", %{
       "type" => "session.output.delta",
       "gateway_session_id" => "gw_1",
       "agent_session_id" => "agent_gw_1"
-    }
+    })
   end
 
   test "pushes normalized gateway envelopes to subscribers" do
@@ -42,7 +53,7 @@ defmodule PrehenWeb.SessionChannelTest do
       SessionRegistry.put(%{
         gateway_session_id: "gw_1",
         worker_pid: self(),
-        agent_name: "fake_stdio",
+        agent_name: "coder",
         agent_session_id: "agent_gw_1",
         status: :attached
       })
@@ -61,23 +72,28 @@ defmodule PrehenWeb.SessionChannelTest do
          type: "session.output.delta",
          gateway_session_id: "gw_1",
          agent_session_id: "agent_gw_1",
-         agent: "fake_stdio",
+         agent: "coder",
          seq: 1,
          payload: %{"text" => "hel"}
        }}
     )
 
-    assert_push "event", %{"type" => "session.output.delta", "gateway_session_id" => "gw_1"}
+    assert_push("event", %{"type" => "session.output.delta", "gateway_session_id" => "gw_1"})
   end
 
   test "returns inbox-friendly metadata in the join payload" do
-    worker_pid = spawn(fn -> receive do :stop -> :ok end end)
+    worker_pid =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        end
+      end)
 
     :ok =
       SessionRegistry.put(%{
         gateway_session_id: "gw_join",
         worker_pid: worker_pid,
-        agent_name: "fake_stdio",
+        agent_name: "coder",
         agent_session_id: "agent_gw_join",
         status: :running
       })
@@ -91,7 +107,7 @@ defmodule PrehenWeb.SessionChannelTest do
             %{
               "session_id" => "gw_join",
               "status" => "running",
-              "agent_name" => "fake_stdio"
+              "agent_name" => "coder"
             }, _socket} =
              socket(PrehenWeb.UserSocket)
              |> subscribe_and_join(PrehenWeb.SessionChannel, "session:gw_join")
@@ -108,7 +124,7 @@ defmodule PrehenWeb.SessionChannelTest do
       SessionRegistry.put(%{
         gateway_session_id: "gw_read_only",
         worker_pid: nil,
-        agent_name: "fake_stdio",
+        agent_name: "coder",
         agent_session_id: "agent_gw_read_only",
         status: :crashed
       })
@@ -134,7 +150,7 @@ defmodule PrehenWeb.SessionChannelTest do
       SessionRegistry.put(%{
         gateway_session_id: "gw_dead",
         worker_pid: worker_pid,
-        agent_name: "fake_stdio",
+        agent_name: "coder",
         agent_session_id: "agent_gw_dead",
         status: :attached
       })
@@ -147,13 +163,18 @@ defmodule PrehenWeb.SessionChannelTest do
   end
 
   test "pushes a terminal event when monitored worker goes down" do
-    worker_pid = spawn(fn -> receive do :stop -> :ok end end)
+    worker_pid =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        end
+      end)
 
     :ok =
       SessionRegistry.put(%{
         gateway_session_id: "gw_down",
         worker_pid: worker_pid,
-        agent_name: "fake_stdio",
+        agent_name: "coder",
         agent_session_id: "agent_gw_down",
         status: :attached
       })
@@ -166,20 +187,25 @@ defmodule PrehenWeb.SessionChannelTest do
 
     Process.exit(worker_pid, :kill)
 
-    assert_push "event", %{
+    assert_push("event", %{
       "type" => "session.crashed",
       "gateway_session_id" => "gw_down"
-    }
+    })
   end
 
   test "pushes a terminal event when monitored worker exits cleanly" do
-    worker_pid = spawn(fn -> receive do :stop -> :ok end end)
+    worker_pid =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        end
+      end)
 
     :ok =
       SessionRegistry.put(%{
         gateway_session_id: "gw_clean_exit",
         worker_pid: worker_pid,
-        agent_name: "fake_stdio",
+        agent_name: "coder",
         agent_session_id: "agent_gw_clean_exit",
         status: :attached
       })
@@ -192,51 +218,15 @@ defmodule PrehenWeb.SessionChannelTest do
 
     send(worker_pid, :stop)
 
-    assert_push "event", %{
+    assert_push("event", %{
       "type" => "session.ended",
       "gateway_session_id" => "gw_clean_exit"
-    }
+    })
   end
 
-  test "returns a submit ack payload the inbox browser can correlate" do
-    fake_profile = %Profile{
-      name: "fake_stdio",
-      label: "Fake stdio",
-      implementation: "fake_stdio_impl",
-      default_provider: "openai",
-      default_model: "gpt-5",
-      prompt_profile: "fake_default",
-      workspace_policy: %{mode: "scoped"}
-    }
-
-    fake_implementation = %Implementation{
-      name: "fake_stdio_impl",
-      command: "mix",
-      args: ["run", "--no-start", "test/support/fake_stdio_agent.exs"],
-      env: %{},
-      wrapper: Prehen.Agents.Wrappers.Passthrough
-    }
-
-    registry_pid = Process.whereis(Prehen.Agents.Registry)
-    original = :sys.get_state(registry_pid)
-
-    :sys.replace_state(registry_pid, fn _ ->
-      %{
-        ordered: [fake_profile],
-        by_name: %{"fake_stdio" => fake_profile},
-        supported_ordered: [fake_profile],
-        supported_by_name: %{"fake_stdio" => fake_profile},
-        implementations_ordered: [fake_implementation],
-        implementations_by_name: %{"fake_stdio_impl" => fake_implementation}
-      }
-    end)
-
-    on_exit(fn ->
-      :sys.replace_state(registry_pid, fn _ -> original end)
-    end)
-
+  test "returns a submit ack payload the inbox browser can correlate", %{workspace: workspace} do
     assert {:ok, %{session_id: session_id}} =
-             Prehen.Client.Surface.create_session(agent: "fake_stdio")
+             Prehen.Client.Surface.create_session(agent: "coder", workspace: workspace)
 
     on_exit(fn -> Prehen.Client.Surface.stop_session(session_id) end)
 
@@ -245,12 +235,16 @@ defmodule PrehenWeb.SessionChannelTest do
       |> subscribe_and_join(PrehenWeb.SessionChannel, "session:#{session_id}")
 
     ref = push(socket, "submit", %{"text" => "hello"})
-    assert_reply ref, :ok, %{"request_id" => request_id}, 1_000
+    assert_reply(ref, :ok, %{"request_id" => request_id}, 1_000)
 
-    assert_push "event", %{
-      "type" => "session.output.delta",
-      "payload" => %{"message_id" => ^request_id}
-    }
+    assert_push(
+      "event",
+      %{
+        "type" => "session.output.delta",
+        "payload" => %{"message_id" => ^request_id}
+      },
+      1_000
+    )
   end
 
   test "rejects malformed submit text with a structured error" do
@@ -281,8 +275,7 @@ defmodule PrehenWeb.SessionChannelTest do
       |> Phoenix.Socket.assign(:session_id, "missing_session")
 
     assert {:reply,
-            {:error,
-             %{"reason" => "session_unavailable", "session_id" => "missing_session"}},
+            {:error, %{"reason" => "session_unavailable", "session_id" => "missing_session"}},
             returned_socket} =
              PrehenWeb.SessionChannel.handle_in("submit", %{"text" => "hello"}, socket)
 
@@ -294,7 +287,7 @@ defmodule PrehenWeb.SessionChannelTest do
       SessionRegistry.put(%{
         gateway_session_id: "gw_terminal",
         worker_pid: nil,
-        agent_name: "fake_stdio",
+        agent_name: "coder",
         agent_session_id: "agent_gw_terminal",
         status: :stopped
       })
@@ -311,8 +304,7 @@ defmodule PrehenWeb.SessionChannelTest do
                "reason" => "session_read_only",
                "session_id" => "gw_terminal",
                "status" => "stopped"
-             }},
-            returned_socket} =
+             }}, returned_socket} =
              PrehenWeb.SessionChannel.handle_in("submit", %{"text" => "hello"}, socket)
 
     assert returned_socket.assigns.session_id == "gw_terminal"
@@ -323,7 +315,7 @@ defmodule PrehenWeb.SessionChannelTest do
       SessionRegistry.put(%{
         gateway_session_id: "gw_stopped_terminal",
         worker_pid: nil,
-        agent_name: "fake_stdio",
+        agent_name: "coder",
         agent_session_id: "agent_gw_stopped_terminal",
         status: :stopped
       })
@@ -345,7 +337,7 @@ defmodule PrehenWeb.SessionChannelTest do
       SessionRegistry.put(%{
         gateway_session_id: "gw_crashed_terminal",
         worker_pid: nil,
-        agent_name: "fake_stdio",
+        agent_name: "coder",
         agent_session_id: "agent_gw_crashed_terminal",
         status: :crashed
       })
@@ -362,8 +354,7 @@ defmodule PrehenWeb.SessionChannelTest do
                "reason" => "session_read_only",
                "session_id" => "gw_crashed_terminal",
                "status" => "crashed"
-             }},
-            returned_socket} =
+             }}, returned_socket} =
              PrehenWeb.SessionChannel.handle_in("submit", %{"text" => "hello"}, socket)
 
     assert returned_socket.assigns.session_id == "gw_crashed_terminal"

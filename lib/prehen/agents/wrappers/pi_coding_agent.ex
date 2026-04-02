@@ -14,6 +14,7 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
 
   @recv_call_slack_ms 300
   @shell_command System.find_executable("sh") || "/bin/sh"
+  @support_check_grace_ms 200
   @support_check_timeout_ms 5_000
   @rejected_workspace_policy_modes ~w(disabled off unmanaged)
 
@@ -70,12 +71,13 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
          :ok <- ensure_workspace(workspace),
          {:ok, prompt_payload} <- prompt_payload(session_config, workspace),
          {:ok, command, args, env} <- implementation_command_spec(session_config) do
-      {runtime_command, runtime_args} = runtime_command(command, args, workspace)
+      runtime_launch_args = normalize_pi_launch_args(args, provider, model)
+      {runtime_command, runtime_args} = runtime_command(command, runtime_launch_args, workspace)
 
       {:ok,
        %{
          executable: command,
-         args: args,
+         args: runtime_launch_args,
          runtime_command: runtime_command,
          runtime_args: runtime_args,
          cwd: workspace,
@@ -111,8 +113,9 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
        recv_from: nil,
        recv_request_ref: nil,
        recv_timer_ref: nil,
+       managed_hosts: MapSet.new(),
        current_run: nil,
-       conversation_state: %{}
+       conversation_state: []
      }}
   end
 
@@ -151,11 +154,12 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
   def handle_call({:send_message, attrs}, _from, state) do
     parts = Map.get(attrs, :parts) || Map.get(attrs, "parts") || []
     turn_text = extract_user_text(parts)
+    turn_input = build_turn_input(state.conversation_state, turn_text)
 
     with :ok <- validate_agent_session_id(state, attrs),
          {:ok, message_id} <- fetch_required_string(attrs, :message_id, :contract_failed),
          {:ok, launch} <- build_launch_spec(state.runtime_session_config),
-         {:ok, host} <- start_turn_host(launch, turn_text) do
+         {:ok, host} <- start_turn_host(launch, turn_input) do
       run = %{
         host: host,
         message_id: message_id,
@@ -204,32 +208,8 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
   end
 
   @impl true
-  def handle_info(
-        {:executable_host, host, {:stdout, data}},
-        %{current_run: %{host: host}} = state
-      ) do
-    {:noreply, consume_stdout(state, data)}
-  end
-
-  def handle_info(
-        {:executable_host, host, {:stderr, _data}},
-        %{current_run: %{host: host}} = state
-      ) do
-    {:noreply, state}
-  end
-
-  def handle_info(
-        {:executable_host, host, {:exit_status, status}},
-        %{current_run: %{host: host}} = state
-      ) do
-    {:noreply, fail_current_run(state, {:exit_status, status})}
-  end
-
-  def handle_info(
-        {:executable_host, host, {:exit, reason}},
-        %{current_run: %{host: host}} = state
-      ) do
-    {:noreply, fail_current_run(state, reason)}
+  def handle_info({:executable_host, host, event}, state) do
+    {:noreply, handle_host_event(state, host, event)}
   end
 
   def handle_info(
@@ -241,9 +221,8 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
     {:noreply, clear_recv_waiter(state)}
   end
 
-  def handle_info({:EXIT, host, reason}, %{current_run: %{host: host}} = state)
-      when reason not in [:normal, :shutdown] do
-    {:noreply, fail_current_run(state, reason)}
+  def handle_info({:EXIT, host, reason}, state) do
+    {:noreply, handle_host_exit(state, host, reason)}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -253,6 +232,7 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
     state
     |> clear_recv_waiter()
     |> maybe_stop_current_host()
+    |> maybe_stop_managed_hosts()
 
     :ok
   end
@@ -295,7 +275,8 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
         owner: self(),
         command: run_launch.command,
         args: run_launch.args,
-        env: run_launch.env
+        env: run_launch.env,
+        close_stdin_after_bootstrap: true
       )
     end
   end
@@ -314,6 +295,24 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
     }
   end
 
+  defp build_turn_input([_ | _] = turns, turn_text) do
+    history =
+      turns
+      |> Enum.map(fn turn ->
+        [
+          "user:",
+          Map.get(turn, :user_text, ""),
+          "\nassistant:",
+          Map.get(turn, :assistant_text, "")
+        ]
+      end)
+      |> Enum.intersperse("\n\n")
+
+    IO.iodata_to_binary([history, "\n\nuser:", turn_text])
+  end
+
+  defp build_turn_input(_conversation_state, turn_text), do: turn_text
+
   defp consume_stdout(state, data) do
     buffer = state.current_run.buffer <> data
     {lines, rest} = split_lines(buffer, [])
@@ -324,6 +323,7 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
         %{state | current_run: %{state.current_run | buffer: rest}},
         fn line, acc ->
           case consume_line(acc, line) do
+            {:cont, %{current_run: nil} = next_state} -> {:halt, next_state}
             {:cont, next_state} -> {:cont, next_state}
             {:halt, next_state} -> {:halt, next_state}
           end
@@ -385,6 +385,8 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
     )
   end
 
+  defp consume_pi_event(state, %{"type" => "message_end"}), do: state
+
   defp consume_pi_event(state, %{"type" => "agent_end"} = event) do
     assistant_text =
       extract_latest_assistant_text(Map.get(event, "messages")) ||
@@ -392,26 +394,31 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
 
     state
     |> update_conversation_state(state.current_run.turn_text, assistant_text)
-    |> enqueue_event(%{
-      "type" => "session.output.completed",
-      "payload" => %{"message_id" => state.current_run.message_id}
-    })
-    |> clear_current_run()
+    |> complete_current_run()
   end
 
-  defp consume_pi_event(state, _event), do: state
+  defp consume_pi_event(state, %{"type" => "agent_start"}), do: state
+  defp consume_pi_event(state, %{"type" => "turn_start"}), do: state
+  defp consume_pi_event(state, %{"type" => "message_start"}), do: state
+  defp consume_pi_event(state, %{"type" => "turn_end"}), do: state
+  defp consume_pi_event(state, %{"type" => <<"tool_execution_", _rest::binary>>}), do: state
+
+  defp consume_pi_event(state, %{"type" => _unknown}),
+    do: fail_current_run(state, :contract_failed)
+
+  defp consume_pi_event(state, _event), do: fail_current_run(state, :contract_failed)
 
   defp append_assistant_text(state, delta) do
     update_in(state.current_run.assistant_text, &((&1 || "") <> delta))
   end
 
   defp update_conversation_state(state, user_text, assistant_text) do
-    Map.put(state, :conversation_state, %{
-      last_turn: %{
-        user_text: user_text,
-        assistant_text: assistant_text
-      }
-    })
+    turn = %{
+      user_text: user_text,
+      assistant_text: assistant_text
+    }
+
+    update_in(state.conversation_state, &(&1 ++ [turn]))
   end
 
   defp clear_current_run(state) do
@@ -422,8 +429,7 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
 
   defp cancel_current_run(state) do
     state
-    |> maybe_stop_current_host()
-    |> clear_current_run()
+    |> fail_and_complete_current_run("cancelled")
   end
 
   defp maybe_stop_current_host(%{current_run: %{host: host}} = state) when is_pid(host) do
@@ -433,7 +439,14 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
 
   defp maybe_stop_current_host(state), do: state
 
+  defp maybe_stop_managed_hosts(%{managed_hosts: managed_hosts} = state) do
+    Enum.each(managed_hosts, &maybe_stop_host/1)
+    state
+  end
+
   defp maybe_stop_host(host) when is_pid(host) do
+    maybe_signal_host_os_process(host)
+
     try do
       ExecutableHost.stop(host)
       :ok
@@ -446,25 +459,130 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
 
   defp maybe_stop_host(_host), do: :ok
 
+  defp maybe_signal_host_os_process(host) when is_pid(host) do
+    with {:ok, os_pid} <- host_os_pid(host),
+         kill when is_binary(kill) <- System.find_executable("kill") do
+      _ = System.cmd(kill, ["-TERM", Integer.to_string(os_pid)], stderr_to_stdout: true)
+      :ok
+    else
+      _other -> :ok
+    end
+  end
+
+  defp maybe_signal_host_os_process(_host), do: :ok
+
+  defp host_os_pid(host) when is_pid(host) do
+    case :sys.get_state(host) do
+      %{port: port} when is_port(port) ->
+        case Port.info(port, :os_pid) do
+          {:os_pid, os_pid} when is_integer(os_pid) -> {:ok, os_pid}
+          _other -> :error
+        end
+
+      _other ->
+        :error
+    end
+  catch
+    :exit, _reason -> :error
+  end
+
+  defp host_os_pid(_host), do: :error
+
   defp fail_current_run(%{current_run: nil} = state, _reason), do: state
 
   defp fail_current_run(state, reason) do
     state
-    |> maybe_stop_current_host()
-    |> enqueue_event(%{
-      "type" => "session.error",
-      "payload" => %{
-        "message_id" => state.current_run.message_id,
-        "reason" => format_error_reason(reason)
-      }
-    })
-    |> clear_current_run()
+    |> fail_and_complete_current_run(format_error_reason(reason))
   end
 
   defp format_error_reason(:contract_failed), do: "contract_failed"
   defp format_error_reason(:timeout), do: "timeout"
   defp format_error_reason({:exit_status, status}), do: "exit_status:#{status}"
   defp format_error_reason(reason), do: inspect(reason)
+
+  defp complete_current_run(%{current_run: %{host: host, message_id: message_id}} = state) do
+    maybe_stop_host(host)
+
+    state
+    |> enqueue_event(%{
+      "type" => "session.output.completed",
+      "payload" => %{"message_id" => message_id}
+    })
+    |> clear_current_run()
+  end
+
+  defp fail_and_complete_current_run(
+         %{current_run: %{host: host, message_id: message_id}} = state,
+         reason
+       ) do
+    maybe_stop_host(host)
+
+    state
+    |> enqueue_event(%{
+      "type" => "session.error",
+      "payload" => %{
+        "message_id" => message_id,
+        "reason" => reason
+      }
+    })
+    |> enqueue_event(%{
+      "type" => "session.output.completed",
+      "payload" => %{"message_id" => message_id}
+    })
+    |> clear_current_run()
+  end
+
+  defp handle_host_event(state, host, event) do
+    cond do
+      current_run_host?(state, host) ->
+        handle_current_run_host_event(state, event)
+
+      MapSet.member?(state.managed_hosts, host) ->
+        handle_managed_host_event(state, host, event)
+
+      true ->
+        state
+    end
+  end
+
+  defp handle_current_run_host_event(state, {:stdout, data}), do: consume_stdout(state, data)
+  defp handle_current_run_host_event(state, {:stderr, _data}), do: state
+
+  defp handle_current_run_host_event(state, {:exit_status, status}),
+    do: fail_current_run(state, {:exit_status, status})
+
+  defp handle_current_run_host_event(state, {:exit, reason}), do: fail_current_run(state, reason)
+
+  defp handle_managed_host_event(state, host, {:exit_status, _status}),
+    do: untrack_managed_host(state, host)
+
+  defp handle_managed_host_event(state, host, {:exit, _reason}),
+    do: untrack_managed_host(state, host)
+
+  defp handle_managed_host_event(state, _host, {:stdout, _data}), do: state
+  defp handle_managed_host_event(state, _host, {:stderr, _data}), do: state
+
+  defp handle_host_exit(state, host, reason) do
+    cond do
+      current_run_host?(state, host) ->
+        fail_current_run(state, reason)
+
+      MapSet.member?(state.managed_hosts, host) ->
+        untrack_managed_host(state, host)
+
+      true ->
+        state
+    end
+  end
+
+  defp current_run_host?(%{current_run: %{host: host}}, host), do: true
+  defp current_run_host?(_state, _host), do: false
+
+  defp untrack_managed_host(%{managed_hosts: managed_hosts} = state, host) when is_pid(host) do
+    %{state | managed_hosts: MapSet.delete(managed_hosts, host)}
+  end
+
+  defp untrack_managed_host(state, _host), do: state
 
   defp enqueue_event(%{recv_from: recv_from} = state, event) when not is_nil(recv_from) do
     GenServer.reply(recv_from, {:ok, event})
@@ -487,15 +605,36 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
   end
 
   defp run_support_probe(run_launch) do
+    caller = self()
+    result_ref = make_ref()
+
+    probe_pid =
+      spawn(fn ->
+        Process.flag(:trap_exit, true)
+        send(caller, {:support_probe_result, result_ref, run_support_probe_worker(run_launch)})
+      end)
+
+    receive do
+      {:support_probe_result, ^result_ref, result} ->
+        result
+    after
+      @support_check_timeout_ms + @support_check_grace_ms + 250 ->
+        Process.exit(probe_pid, :kill)
+        {:error, :contract_failed}
+    end
+  end
+
+  defp run_support_probe_worker(run_launch) do
     with {:ok, host} <-
            ExecutableHost.start_link(
              owner: self(),
              command: run_launch.command,
              args: run_launch.args,
-             env: run_launch.env
+             env: run_launch.env,
+             close_stdin_after_bootstrap: true
            ) do
       try do
-        await_support_probe(host, %{buffer: "", header_seen?: false})
+        await_support_probe(host, %{buffer: "", header_seen_at: nil})
       after
         maybe_stop_host(host)
       end
@@ -505,25 +644,31 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
   end
 
   defp await_support_probe(host, probe_state) do
-    receive do
-      {:executable_host, ^host, {:stdout, data}} ->
-        case consume_support_stdout(probe_state, data) do
-          :ok -> :ok
-          {:ok, next_probe_state} -> await_support_probe(host, next_probe_state)
-          {:error, reason} -> {:error, reason}
-        end
+    if support_probe_stable?(probe_state) do
+      :ok
+    else
+      receive do
+        {:executable_host, ^host, {:stdout, data}} ->
+          case consume_support_stdout(probe_state, data) do
+            {:ok, next_probe_state} -> await_support_probe(host, next_probe_state)
+            {:error, reason} -> {:error, reason}
+          end
 
-      {:executable_host, ^host, {:stderr, _data}} ->
-        await_support_probe(host, probe_state)
+        {:executable_host, ^host, {:stderr, _data}} ->
+          await_support_probe(host, probe_state)
 
-      {:executable_host, ^host, {:exit_status, _status}} ->
-        {:error, :contract_failed}
+        {:executable_host, ^host, {:exit_status, 0}} ->
+          if support_probe_header_seen?(probe_state), do: :ok, else: {:error, :contract_failed}
 
-      {:executable_host, ^host, {:exit, _reason}} ->
-        {:error, :contract_failed}
-    after
-      @support_check_timeout_ms ->
-        {:error, :contract_failed}
+        {:executable_host, ^host, {:exit_status, _status}} ->
+          {:error, :contract_failed}
+
+        {:executable_host, ^host, {:exit, _reason}} ->
+          {:error, :contract_failed}
+      after
+        support_probe_timeout_ms(probe_state) ->
+          if support_probe_stable?(probe_state), do: :ok, else: {:error, :contract_failed}
+      end
     end
   end
 
@@ -533,7 +678,6 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
 
     Enum.reduce_while(lines, {:ok, %{probe_state | buffer: rest}}, fn line, {:ok, acc} ->
       case consume_support_line(acc, line) do
-        :ok -> {:halt, :ok}
         {:ok, next_acc} -> {:cont, {:ok, next_acc}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
@@ -547,18 +691,66 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
       trimmed == "" ->
         {:ok, probe_state}
 
-      not probe_state.header_seen? ->
+      not support_probe_header_seen?(probe_state) ->
         case Jason.decode(trimmed) do
           {:ok, %{"type" => "session"}} ->
-            :ok
+            {:ok, %{probe_state | header_seen_at: now_ms()}}
 
           _other ->
             {:error, :contract_failed}
         end
 
       true ->
-        {:ok, probe_state}
+        case Jason.decode(trimmed) do
+          {:ok, %{"type" => type}} when is_binary(type) ->
+            if support_probe_event_type?(type) do
+              {:ok, probe_state}
+            else
+              {:error, :contract_failed}
+            end
+
+          {:ok, _event} ->
+            {:error, :contract_failed}
+
+          {:error, _reason} ->
+            {:error, :contract_failed}
+        end
     end
+  end
+
+  defp support_probe_header_seen?(%{header_seen_at: seen_at}) when is_integer(seen_at), do: true
+  defp support_probe_header_seen?(_probe_state), do: false
+
+  defp support_probe_stable?(%{header_seen_at: seen_at}) when is_integer(seen_at) do
+    now_ms() - seen_at >= @support_check_grace_ms
+  end
+
+  defp support_probe_stable?(_probe_state), do: false
+
+  defp support_probe_event_type?(type)
+       when type in [
+              "agent_start",
+              "turn_start",
+              "message_start",
+              "message_update",
+              "message_end",
+              "turn_end",
+              "agent_end"
+            ],
+       do: true
+
+  defp support_probe_event_type?(<<"tool_execution_", _rest::binary>>), do: true
+  defp support_probe_event_type?(_type), do: false
+
+  defp support_probe_timeout_ms(%{header_seen_at: seen_at}) when is_integer(seen_at) do
+    remaining = @support_check_grace_ms - (now_ms() - seen_at)
+    max(remaining, 0)
+  end
+
+  defp support_probe_timeout_ms(_probe_state), do: @support_check_timeout_ms
+
+  defp now_ms do
+    System.monotonic_time(:millisecond)
   end
 
   defp split_lines(buffer, acc) do
@@ -654,6 +846,51 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
     {@shell_command,
      ["-lc", "cd \"$1\" && shift && exec \"$@\"", "prehen-pi", workspace, command | args]}
   end
+
+  defp normalize_pi_launch_args(args, provider, model) do
+    {prefix, option_args} = split_pi_launcher_prefix(List.wrap(args))
+
+    prefix ++
+      ["--mode", "json", "--provider", provider, "--model", model] ++
+      strip_pi_launch_overrides(option_args)
+  end
+
+  defp split_pi_launcher_prefix(args), do: split_pi_launcher_prefix(args, [])
+
+  defp split_pi_launcher_prefix([arg | rest], acc) do
+    if String.starts_with?(arg, "-") do
+      {Enum.reverse(acc), [arg | rest]}
+    else
+      split_pi_launcher_prefix(rest, [arg | acc])
+    end
+  end
+
+  defp split_pi_launcher_prefix([], acc), do: {Enum.reverse(acc), []}
+
+  defp strip_pi_launch_overrides(args), do: strip_pi_launch_overrides(args, [])
+
+  defp strip_pi_launch_overrides(["--mode", _value | rest], acc),
+    do: strip_pi_launch_overrides(rest, acc)
+
+  defp strip_pi_launch_overrides(["--provider", _value | rest], acc),
+    do: strip_pi_launch_overrides(rest, acc)
+
+  defp strip_pi_launch_overrides(["--model", _value | rest], acc),
+    do: strip_pi_launch_overrides(rest, acc)
+
+  defp strip_pi_launch_overrides([<<"--mode=", _value::binary>> | rest], acc),
+    do: strip_pi_launch_overrides(rest, acc)
+
+  defp strip_pi_launch_overrides([<<"--provider=", _value::binary>> | rest], acc),
+    do: strip_pi_launch_overrides(rest, acc)
+
+  defp strip_pi_launch_overrides([<<"--model=", _value::binary>> | rest], acc),
+    do: strip_pi_launch_overrides(rest, acc)
+
+  defp strip_pi_launch_overrides([arg | rest], acc),
+    do: strip_pi_launch_overrides(rest, [arg | acc])
+
+  defp strip_pi_launch_overrides([], acc), do: Enum.reverse(acc)
 
   defp workspace_root(session_config) do
     case normalize_optional_string(Map.get(session_config, :workspace)) do

@@ -2,26 +2,30 @@ defmodule Prehen.Integration.WebInboxTest do
   use ExUnit.Case, async: false
 
   import ExUnit.CaptureLog
-  alias Prehen.Agents.Profile
-  alias Prehen.Agents.Registry
-  alias Prehen.Gateway.InboxProjection
-  import Phoenix.ConnTest
   import Phoenix.ChannelTest
+  import Phoenix.ConnTest
+
+  alias Prehen.Gateway.InboxProjection
+  alias Prehen.TestSupport.PiAgentFixture
 
   @endpoint PrehenWeb.Endpoint
 
   setup do
     InboxProjection.reset()
-    registry_pid = Process.whereis(Registry)
-    original = :sys.get_state(registry_pid)
 
-    set_registry([fake_profile()], fake_implementations())
+    original =
+      PiAgentFixture.replace_registry!(
+        set_registry_state([fake_profile()], fake_implementations())
+      )
+
+    workspace = PiAgentFixture.workspace!("web_inbox")
 
     on_exit(fn ->
-      :sys.replace_state(registry_pid, fn _ -> original end)
+      PiAgentFixture.restore_registry!(original)
+      File.rm_rf(workspace)
     end)
 
-    :ok
+    {:ok, workspace: workspace}
   end
 
   test "lists sessions for the inbox page" do
@@ -34,6 +38,7 @@ defmodule Prehen.Integration.WebInboxTest do
     conn = get(build_conn(), "/agents")
 
     assert %{"agents" => agents} = json_response(conn, 200)
+
     assert [
              %{
                "agent" => "coder",
@@ -77,12 +82,15 @@ defmodule Prehen.Integration.WebInboxTest do
     assert %{"agents" => []} = json_response(conn, 200)
   end
 
-  test "supports create detail history and stop through inbox JSON endpoints" do
+  test "supports create detail history and stop through inbox JSON endpoints", %{
+    workspace: workspace
+  } do
     conn =
       post(build_conn(), "/inbox/sessions", %{
         "agent" => "coder",
         "provider" => "anthropic",
-        "model" => "claude-sonnet"
+        "model" => "claude-sonnet",
+        "workspace" => workspace
       })
 
     assert %{"session_id" => session_id, "agent" => "coder", "status" => "attached"} =
@@ -107,7 +115,11 @@ defmodule Prehen.Integration.WebInboxTest do
 
     assert [
              %{"kind" => "user_message", "message_id" => ^request_id, "text" => "hello inbox"},
-             %{"kind" => "assistant_message", "message_id" => ^request_id, "text" => "hi"}
+             %{
+               "kind" => "assistant_message",
+               "message_id" => ^request_id,
+               "text" => "echo:hello inbox"
+             }
            ] = history_conn
 
     conn = get(build_conn(), "/inbox/sessions/#{session_id}")
@@ -148,12 +160,14 @@ defmodule Prehen.Integration.WebInboxTest do
     assert message =~ ":no_agent_profiles_configured"
   end
 
-  test "creates an inbox session with the default agent when agent is omitted" do
+  test "creates an inbox session with the default agent when agent is omitted", %{
+    workspace: workspace
+  } do
     unsupported = fake_profile("unsupported", "Unsupported")
     coder = fake_profile("coder", "Coder")
     set_registry([unsupported, coder], fake_implementations(), ["coder"])
 
-    conn = post(build_conn(), "/inbox/sessions", %{})
+    conn = post(build_conn(), "/inbox/sessions", %{"workspace" => workspace})
 
     assert %{"session_id" => session_id, "agent" => "coder", "status" => "attached"} =
              json_response(conn, 201)
@@ -183,8 +197,8 @@ defmodule Prehen.Integration.WebInboxTest do
     assert message =~ "coder_impl"
   end
 
-  test "stopping a retained inbox session is idempotent" do
-    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "coder"})
+  test "stopping a retained inbox session is idempotent", %{workspace: workspace} do
+    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "coder", "workspace" => workspace})
     assert %{"session_id" => session_id, "status" => "attached"} = json_response(conn, 201)
 
     on_exit(fn -> cleanup_session(session_id) end)
@@ -201,8 +215,10 @@ defmodule Prehen.Integration.WebInboxTest do
              json_response(conn, 200)
   end
 
-  test "web inbox flow can create over HTTP and submit over SessionChannel" do
-    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "coder"})
+  test "web inbox flow can create over HTTP and submit over SessionChannel", %{
+    workspace: workspace
+  } do
+    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "coder", "workspace" => workspace})
     assert %{"session_id" => session_id} = json_response(conn, 201)
 
     {:ok, _, socket} =
@@ -230,12 +246,12 @@ defmodule Prehen.Integration.WebInboxTest do
 
     assert [
              %{"kind" => "user_message", "message_id" => ^request_id, "text" => "hello"},
-             %{"kind" => "assistant_message", "message_id" => ^request_id, "text" => "hi"}
+             %{"kind" => "assistant_message", "message_id" => ^request_id, "text" => "echo:hello"}
            ] = history
   end
 
-  test "stops a live inbox session even when projection state is missing" do
-    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "coder"})
+  test "stops a live inbox session even when projection state is missing", %{workspace: workspace} do
+    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "coder", "workspace" => workspace})
     assert %{"session_id" => session_id, "status" => "attached"} = json_response(conn, 201)
 
     on_exit(fn -> cleanup_session(session_id) end)
@@ -260,8 +276,11 @@ defmodule Prehen.Integration.WebInboxTest do
     refute log =~ "lib/prehen/gateway/session_worker.ex:186"
   end
 
-  test "recreates retained row on idempotent delete when registry is already terminal and projection is missing" do
-    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "coder"})
+  test "recreates retained row on idempotent delete when registry is already terminal and projection is missing",
+       %{
+         workspace: workspace
+       } do
+    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "coder", "workspace" => workspace})
     assert %{"session_id" => session_id, "status" => "attached"} = json_response(conn, 201)
 
     on_exit(fn -> cleanup_session(session_id) end)
@@ -292,17 +311,11 @@ defmodule Prehen.Integration.WebInboxTest do
   end
 
   defp fake_profile(name \\ "coder", label \\ "Coder") do
-    %Profile{
-      name: name,
+    PiAgentFixture.profile(name,
       label: label,
-      implementation: "#{name}_impl",
-      default_provider: "openai",
-      default_model: "gpt-5",
-      prompt_profile: "#{name}_default",
-      workspace_policy: %{mode: "scoped"},
-      transport: :stdio
-    }
-    |> Map.put(:description, description_for(name))
+      description: description_for(name),
+      prompt_profile: "#{name}_default"
+    )
   end
 
   defp fake_implementations do
@@ -314,32 +327,18 @@ defmodule Prehen.Integration.WebInboxTest do
   end
 
   defp fake_implementation(name) do
-    %{
-      name: name,
-      command: "mix",
-      args: ["run", "--no-start", "test/support/fake_wrapper_agent.exs"],
-      env: %{},
-      wrapper: Prehen.Agents.Wrappers.Passthrough
-    }
+    profile_name = String.replace_suffix(name, "_impl", "")
+    PiAgentFixture.implementation(profile_name, %{}, name: name)
   end
 
   defp set_registry(profiles, implementations, supported_names \\ nil) do
-    registry_pid = Process.whereis(Registry)
+    PiAgentFixture.replace_registry!(
+      set_registry_state(profiles, implementations, supported_names)
+    )
+  end
 
-    supported_names = supported_names || Enum.map(profiles, & &1.name)
-    supported_profiles = Enum.filter(profiles, &(&1.name in supported_names))
-
-    :sys.replace_state(registry_pid, fn _ ->
-      %{
-        ordered: profiles,
-        by_name: Map.new(profiles, fn %Profile{name: name} = profile -> {name, profile} end),
-        supported_ordered: supported_profiles,
-        supported_by_name:
-          Map.new(supported_profiles, fn %Profile{name: name} = profile -> {name, profile} end),
-        implementations_ordered: implementations,
-        implementations_by_name: Map.new(implementations, fn impl -> {impl.name, impl} end)
-      }
-    end)
+  defp set_registry_state(profiles, implementations, supported_names \\ nil) do
+    PiAgentFixture.registry_state(profiles, implementations, supported_names)
   end
 
   defp description_for("coder"), do: "General coding profile"

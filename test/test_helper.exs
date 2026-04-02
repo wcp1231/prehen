@@ -11,4 +11,6 @@ defmodule PrehenWeb.ChannelCase do
   end
 end
 
+Code.require_file("support/pi_agent_fixture.ex", __DIR__)
+
 ExUnit.start()
