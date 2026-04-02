@@ -23,49 +23,44 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
     assert launch.prompt_payload =~ "You are Prehen coder."
   end
 
-  test "launches an executable with wrapper-controlled prompt provider model and workspace" do
-    workspace = tmp_workspace_path("runtime")
-
-    implementation = %Implementation{
-      name: "pi_coding_agent",
-      command: "python3",
-      args: ["-u", "-c", compatibility_probe_script()],
-      env: %{},
-      wrapper: PiCodingAgent
-    }
+  test "opens a synthetic session and maps pi text deltas into gateway frames" do
+    workspace = tmp_workspace_path("native")
 
     session_config =
-      session_config(workspace,
-        implementation: implementation,
-        prompt_context: "You are Prehen coder."
-      )
+      session_config(workspace, implementation: fake_pi_implementation())
 
-    assert :ok = PiCodingAgent.support_check(session_config)
     assert {:ok, wrapper} = PiCodingAgent.start_link(session_config: session_config)
 
-    assert {:ok, %{agent_session_id: "agent_pi"}} =
+    assert {:ok, %{agent_session_id: agent_session_id}} =
              PiCodingAgent.open_session(wrapper, %{
-               gateway_session_id: "gw_pi",
+               gateway_session_id: "gw_pi_native",
                provider: "openai",
                model: "gpt-5",
                prompt_profile: "coder_default",
-               workspace: workspace,
-               prompt: %{system: "You are Prehen coder."}
+               workspace: workspace
              })
+
+    assert is_binary(agent_session_id) and agent_session_id != ""
 
     assert :ok =
              PiCodingAgent.send_message(wrapper, %{
-               agent_session_id: "agent_pi",
-               message_id: "msg_pi",
+               agent_session_id: agent_session_id,
+               message_id: "msg_pi_native",
                parts: [%{type: "text", text: "ping"}]
              })
 
-    assert {:ok, %{"type" => "session.output.delta", "payload" => %{"text" => text}}} =
+    assert {:ok,
+            %{
+              "type" => "session.output.delta",
+              "payload" => %{"message_id" => "msg_pi_native", "text" => "echo:ping"}
+            }} =
              PiCodingAgent.recv_event(wrapper, 1_000)
 
-    assert_validation_report!(text, workspace)
-
-    assert {:ok, %{"type" => "session.output.completed"}} =
+    assert {:ok,
+            %{
+              "type" => "session.output.completed",
+              "payload" => %{"message_id" => "msg_pi_native"}
+            }} =
              PiCodingAgent.recv_event(wrapper, 1_000)
 
     ref = Process.monitor(wrapper)
@@ -73,63 +68,60 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
     assert_receive {:DOWN, ^ref, :process, ^wrapper, _reason}, 1_000
   end
 
-  test "support_check rejects startable executables that do not yield a stable opened session" do
-    workspace = tmp_workspace_path("contract_failed")
-
-    implementation = %Implementation{
-      name: "pi_coding_agent",
-      command: "python3",
-      args: ["-u", "-c", unstable_open_script()],
-      env: %{},
-      wrapper: PiCodingAgent
-    }
+  test "rejects a second turn while a run is still active" do
+    workspace = tmp_workspace_path("busy")
 
     session_config =
-      session_config(workspace,
-        implementation: implementation,
-        prompt_context: "You are Prehen coder."
+      session_config(
+        workspace,
+        implementation: fake_pi_implementation(%{"FAKE_PI_MODE" => "busy"})
       )
 
-    assert {:error, :contract_failed} = PiCodingAgent.support_check(session_config)
+    assert {:ok, wrapper} = PiCodingAgent.start_link(session_config: session_config)
+
+    assert {:ok, %{agent_session_id: agent_session_id}} =
+             PiCodingAgent.open_session(wrapper, %{
+               gateway_session_id: "gw_busy",
+               provider: "openai",
+               model: "gpt-5",
+               prompt_profile: "coder_default",
+               workspace: workspace
+             })
+
+    assert :ok =
+             PiCodingAgent.send_message(wrapper, %{
+               agent_session_id: agent_session_id,
+               message_id: "msg_busy_1",
+               parts: [%{type: "text", text: "first"}]
+             })
+
+    assert {:error, :session_busy} =
+             PiCodingAgent.send_message(wrapper, %{
+               agent_session_id: agent_session_id,
+               message_id: "msg_busy_2",
+               parts: [%{type: "text", text: "second"}]
+             })
+
+    assert :ok = PiCodingAgent.stop(wrapper)
   end
 
-  test "support_check classifies open-time process exit as contract failure" do
-    workspace = tmp_workspace_path("open_exit")
-
-    implementation = %Implementation{
-      name: "pi_coding_agent",
-      command: "python3",
-      args: ["-u", "-c", open_exit_script()],
-      env: %{},
-      wrapper: PiCodingAgent
-    }
-
+  test "support_check accepts a minimal native stream that starts with a session header" do
     session_config =
-      session_config(workspace,
-        implementation: implementation,
-        prompt_context: "You are Prehen coder."
+      session_config(tmp_workspace_path("support_check_ok"),
+        implementation: fake_pi_implementation()
       )
+      |> Map.put(:prompt_context, "You are Prehen coder.")
 
-    assert {:error, :contract_failed} = PiCodingAgent.support_check(session_config)
+    assert :ok = PiCodingAgent.support_check(session_config)
   end
 
-  @tag timeout: 25_000
-  test "support_check classifies open-time hang timeout as contract failure" do
-    workspace = tmp_workspace_path("open_timeout")
-
-    implementation = %Implementation{
-      name: "pi_coding_agent",
-      command: "python3",
-      args: ["-u", "-c", open_timeout_script()],
-      env: %{},
-      wrapper: PiCodingAgent
-    }
-
+  test "support_check rejects a stream without a valid session header" do
     session_config =
-      session_config(workspace,
-        implementation: implementation,
-        prompt_context: "You are Prehen coder."
+      session_config(
+        tmp_workspace_path("invalid_header"),
+        implementation: fake_pi_implementation(%{"FAKE_PI_MODE" => "invalid_header"})
       )
+      |> Map.put(:prompt_context, "You are Prehen coder.")
 
     assert {:error, :contract_failed} = PiCodingAgent.support_check(session_config)
   end
@@ -137,17 +129,9 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
   test "support_check classifies policy rejection directly" do
     workspace = tmp_workspace_path("policy_rejected")
 
-    implementation = %Implementation{
-      name: "pi_coding_agent",
-      command: "python3",
-      args: ["-u", "-c", compatibility_probe_script()],
-      env: %{},
-      wrapper: PiCodingAgent
-    }
-
     session_config =
       session_config(workspace,
-        implementation: implementation,
+        implementation: fake_pi_implementation(),
         prompt_context: "You are Prehen coder."
       )
       |> Map.put(:workspace_policy, %{mode: "disabled"})
@@ -156,17 +140,9 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
   end
 
   test "support_check classifies capability failures directly" do
-    implementation = %Implementation{
-      name: "pi_coding_agent",
-      command: "python3",
-      args: ["-u", "-c", compatibility_probe_script()],
-      env: %{},
-      wrapper: PiCodingAgent
-    }
-
     session_config =
       session_config("relative/workspace",
-        implementation: implementation,
+        implementation: fake_pi_implementation(),
         prompt_context: "You are Prehen coder."
       )
 
@@ -193,68 +169,6 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
     assert {:error, :launch_failed} = PiCodingAgent.support_check(session_config)
   end
 
-  @tag skip:
-         if(System.get_env("PI_CODING_AGENT_BIN"),
-           do: false,
-           else: "set PI_CODING_AGENT_BIN to run the real executable wrapper validation"
-         )
-  test "validates the configured pi-coding-agent executable through the wrapper" do
-    workspace = tmp_workspace_path("real")
-
-    implementation = %Implementation{
-      name: "pi_coding_agent",
-      command: System.fetch_env!("PI_CODING_AGENT_BIN"),
-      args: [],
-      env: %{},
-      wrapper: PiCodingAgent
-    }
-
-    session_config =
-      session_config(workspace,
-        implementation: implementation,
-        prompt_context: "You are Prehen coder."
-      )
-
-    assert :ok = PiCodingAgent.support_check(session_config)
-    assert {:ok, wrapper} = PiCodingAgent.start_link(session_config: session_config)
-
-    assert {:ok, %{agent_session_id: agent_session_id}} =
-             PiCodingAgent.open_session(wrapper, %{
-               gateway_session_id: "gw_pi_real",
-               provider: "openai",
-               model: "gpt-5",
-               prompt_profile: "coder_default",
-               workspace: workspace,
-               prompt: %{system: "You are Prehen coder."}
-             })
-
-    assert is_binary(agent_session_id) and agent_session_id != ""
-
-    assert :ok =
-             PiCodingAgent.send_message(wrapper, %{
-               agent_session_id: agent_session_id,
-               message_id: "msg_pi_real",
-               parts: [%{type: "text", text: "ping"}]
-             })
-
-    assert {:ok,
-            %{
-              "type" => "session.output.delta",
-              "payload" => %{"message_id" => "msg_pi_real", "text" => text}
-            }} =
-             PiCodingAgent.recv_event(wrapper, 5_000)
-
-    assert is_binary(text) and text != ""
-
-    assert {:ok,
-            %{"type" => "session.output.completed", "payload" => %{"message_id" => "msg_pi_real"}}} =
-             PiCodingAgent.recv_event(wrapper, 5_000)
-
-    ref = Process.monitor(wrapper)
-    assert :ok = PiCodingAgent.stop(wrapper)
-    assert_receive {:DOWN, ^ref, :process, ^wrapper, _reason}, 1_000
-  end
-
   defp session_config(workspace, opts) do
     implementation = Keyword.get(opts, :implementation)
 
@@ -269,6 +183,24 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
     |> Map.put(:prompt_context, Keyword.get(opts, :prompt_context))
   end
 
+  defp fake_pi_implementation(extra_env \\ %{}) do
+    %Implementation{
+      name: "pi_coding_agent",
+      command: python_command(),
+      args: [fake_pi_script_path(), "--mode", "json"],
+      env: Map.merge(%{}, extra_env),
+      wrapper: PiCodingAgent
+    }
+  end
+
+  defp python_command do
+    System.find_executable("python3") || "python3"
+  end
+
+  defp fake_pi_script_path do
+    Path.expand("../../../support/fake_pi_json_agent.py", __DIR__)
+  end
+
   defp tmp_workspace_path(label) do
     workspace =
       Path.join(
@@ -278,137 +210,7 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
 
     File.mkdir_p!(workspace)
     on_exit(fn -> File.rm_rf(workspace) end)
+
     workspace
-  end
-
-  defp compatibility_probe_script do
-    """
-    import json
-    import os
-    import sys
-
-    state = {}
-
-    for raw in sys.stdin:
-        frame = json.loads(raw)
-        frame_type = frame.get("type")
-        payload = frame.get("payload", {})
-
-        if frame_type == "session.open":
-            state["provider_open"] = payload.get("provider")
-            state["model_open"] = payload.get("model")
-            state["workspace_open"] = payload.get("workspace")
-            state["prompt_open"] = json.dumps(payload.get("prompt"), sort_keys=True)
-
-            sys.stdout.write(json.dumps({
-                "type": "session.opened",
-                "payload": {"agent_session_id": "agent_pi"}
-            }) + "\\n")
-            sys.stdout.flush()
-        elif frame_type == "session.message":
-            report = {
-                "provider_env": os.environ.get("PREHEN_PROVIDER"),
-                "model_env": os.environ.get("PREHEN_MODEL"),
-                "workspace_env": os.environ.get("PREHEN_WORKSPACE"),
-                "prompt_env": os.environ.get("PREHEN_PROMPT"),
-                "cwd": os.getcwd(),
-                "provider_open": state.get("provider_open"),
-                "model_open": state.get("model_open"),
-                "workspace_open": state.get("workspace_open"),
-                "prompt_open": state.get("prompt_open")
-            }
-
-            sys.stdout.write(json.dumps({
-                "type": "session.output.delta",
-                "payload": {
-                    "agent_session_id": payload.get("agent_session_id", "agent_pi"),
-                    "message_id": payload["message_id"],
-                    "text": json.dumps(report, sort_keys=True)
-                }
-            }) + "\\n")
-            sys.stdout.write(json.dumps({
-                "type": "session.output.completed",
-                "payload": {
-                    "agent_session_id": payload.get("agent_session_id", "agent_pi"),
-                    "message_id": payload["message_id"]
-                }
-            }) + "\\n")
-            sys.stdout.flush()
-        elif frame_type == "session.control":
-            sys.exit(0)
-    """
-  end
-
-  defp unstable_open_script do
-    """
-    import json
-    import sys
-
-    for raw in sys.stdin:
-        frame = json.loads(raw)
-        if frame.get("type") == "session.open":
-            sys.stdout.write(json.dumps({
-                "type": "session.opened",
-                "payload": {"ready": True}
-            }) + "\\n")
-            sys.stdout.flush()
-    """
-  end
-
-  defp open_exit_script do
-    """
-    import json
-    import sys
-
-    for raw in sys.stdin:
-        frame = json.loads(raw)
-        if frame.get("type") == "session.open":
-            sys.exit(17)
-    """
-  end
-
-  defp open_timeout_script do
-    """
-    import json
-    import time
-
-    for raw in __import__("sys").stdin:
-        frame = json.loads(raw)
-        if frame.get("type") == "session.open":
-            time.sleep(17)
-    """
-  end
-
-  defp assert_validation_report!(text, workspace) do
-    report =
-      case Jason.decode(text) do
-        {:ok, decoded} ->
-          decoded
-
-        {:error, reason} ->
-          flunk("""
-          expected the executable to echo a JSON validation report in the first delta, got:
-          #{inspect(text)}
-          decode error:
-          #{inspect(reason)}
-          """)
-      end
-
-    assert report["provider_env"] == "openai"
-    assert report["model_env"] == "gpt-5"
-    assert report["workspace_env"] == workspace
-    assert report["provider_open"] == "openai"
-    assert report["model_open"] == "gpt-5"
-    assert report["workspace_open"] == workspace
-    assert same_path?(report["cwd"], workspace)
-    assert report["prompt_env"] =~ "You are Prehen coder."
-    assert report["prompt_open"] =~ "You are Prehen coder."
-  end
-
-  defp same_path?(left, right) do
-    left = Path.expand(left)
-    right = Path.expand(right)
-
-    left == right || left == "/private" <> right || "/private" <> left == right
   end
 end
