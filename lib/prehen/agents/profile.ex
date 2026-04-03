@@ -78,6 +78,16 @@ defmodule Prehen.Agents.Profile do
 
   def description(_profile), do: nil
 
+  def id(%__MODULE__{name: name}), do: normalize_optional_string(name)
+
+  def id(profile) when is_map(profile) do
+    profile
+    |> Map.get(:id, Map.get(profile, "id") || Map.get(profile, :name) || Map.get(profile, "name"))
+    |> normalize_optional_string()
+  end
+
+  def id(_profile), do: nil
+
   defp normalize_optional_string(value) when is_binary(value) do
     case String.trim(value) do
       "" -> nil

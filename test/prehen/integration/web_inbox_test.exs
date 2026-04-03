@@ -18,14 +18,22 @@ defmodule Prehen.Integration.WebInboxTest do
         set_registry_state([fake_profile()], fake_implementations())
       )
 
-    workspace = PiAgentFixture.workspace!("web_inbox")
+    prehen_home = tmp_prehen_home("web_inbox")
+    previous_prehen_home = System.get_env("PREHEN_HOME")
+
+    System.put_env("PREHEN_HOME", prehen_home)
+    write_profile_home!(prehen_home, "coder")
+    write_profile_home!(prehen_home, "zebra")
+    write_profile_home!(prehen_home, "alpha")
+    write_profile_home!(prehen_home, "unsupported")
 
     on_exit(fn ->
       PiAgentFixture.restore_registry!(original)
-      File.rm_rf(workspace)
+      restore_prehen_home(previous_prehen_home)
+      File.rm_rf(prehen_home)
     end)
 
-    {:ok, workspace: workspace}
+    {:ok, prehen_home: prehen_home}
   end
 
   test "lists sessions for the inbox page" do
@@ -83,14 +91,13 @@ defmodule Prehen.Integration.WebInboxTest do
   end
 
   test "supports create detail history and stop through inbox JSON endpoints", %{
-    workspace: workspace
+    prehen_home: prehen_home
   } do
     conn =
       post(build_conn(), "/inbox/sessions", %{
         "agent" => "coder",
         "provider" => "anthropic",
-        "model" => "claude-sonnet",
-        "workspace" => workspace
+        "model" => "claude-sonnet"
       })
 
     assert %{"session_id" => session_id, "agent" => "coder", "status" => "attached"} =
@@ -132,6 +139,7 @@ defmodule Prehen.Integration.WebInboxTest do
     assert %{"session" => gateway_session} = json_response(conn, 200)
     assert gateway_session["provider"] == "anthropic"
     assert gateway_session["model"] == "claude-sonnet"
+    assert gateway_session["workspace"] == profile_workspace(prehen_home, "coder")
 
     conn = delete(build_conn(), "/inbox/sessions/#{session_id}")
     assert response(conn, 204) == ""
@@ -160,14 +168,21 @@ defmodule Prehen.Integration.WebInboxTest do
     assert message =~ ":no_agent_profiles_configured"
   end
 
-  test "creates an inbox session with the default agent when agent is omitted", %{
-    workspace: workspace
-  } do
+  test "rejects workspace overrides for inbox session creation" do
+    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "coder", "workspace" => "/tmp/other"})
+
+    assert %{"error" => %{"type" => "unprocessable_entity", "message" => message}} =
+             json_response(conn, 422)
+
+    assert message =~ ":workspace_override_not_supported"
+  end
+
+  test "creates an inbox session with the default agent when agent is omitted" do
     unsupported = fake_profile("unsupported", "Unsupported")
     coder = fake_profile("coder", "Coder")
     set_registry([unsupported, coder], fake_implementations(), ["coder"])
 
-    conn = post(build_conn(), "/inbox/sessions", %{"workspace" => workspace})
+    conn = post(build_conn(), "/inbox/sessions", %{})
 
     assert %{"session_id" => session_id, "agent" => "coder", "status" => "attached"} =
              json_response(conn, 201)
@@ -175,7 +190,7 @@ defmodule Prehen.Integration.WebInboxTest do
     on_exit(fn -> cleanup_session(session_id) end)
   end
 
-  test "creates an inbox session with an allocated workspace when workspace is omitted" do
+  test "creates an inbox session in the fixed profile workspace", %{prehen_home: prehen_home} do
     conn = post(build_conn(), "/inbox/sessions", %{"agent" => "coder"})
 
     assert %{"session_id" => session_id, "agent" => "coder", "status" => "attached"} =
@@ -183,14 +198,10 @@ defmodule Prehen.Integration.WebInboxTest do
 
     conn = get(build_conn(), "/sessions/#{session_id}")
     assert %{"session" => %{"workspace" => workspace}} = json_response(conn, 200)
-    assert is_binary(workspace)
-    assert Path.type(workspace) == :absolute
+    assert workspace == profile_workspace(prehen_home, "coder")
     assert File.dir?(workspace)
 
-    on_exit(fn ->
-      cleanup_session(session_id)
-      File.rm_rf(workspace)
-    end)
+    on_exit(fn -> cleanup_session(session_id) end)
   end
 
   test "returns a structured create failure when the requested profile name is unsupported" do
@@ -215,8 +226,8 @@ defmodule Prehen.Integration.WebInboxTest do
     assert message =~ "coder_impl"
   end
 
-  test "stopping a retained inbox session is idempotent", %{workspace: workspace} do
-    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "coder", "workspace" => workspace})
+  test "stopping a retained inbox session is idempotent" do
+    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "coder"})
     assert %{"session_id" => session_id, "status" => "attached"} = json_response(conn, 201)
 
     on_exit(fn -> cleanup_session(session_id) end)
@@ -233,10 +244,8 @@ defmodule Prehen.Integration.WebInboxTest do
              json_response(conn, 200)
   end
 
-  test "web inbox flow can create over HTTP and submit over SessionChannel", %{
-    workspace: workspace
-  } do
-    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "coder", "workspace" => workspace})
+  test "web inbox flow can create over HTTP and submit over SessionChannel" do
+    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "coder"})
     assert %{"session_id" => session_id} = json_response(conn, 201)
 
     {:ok, _, socket} =
@@ -249,7 +258,7 @@ defmodule Prehen.Integration.WebInboxTest do
     assert_push("event", %{
       "type" => "session.output.delta",
       "payload" => %{"message_id" => ^request_id}
-    })
+    }, 1_000)
 
     conn = delete(build_conn(), "/inbox/sessions/#{session_id}")
     assert response(conn, 204)
@@ -268,8 +277,8 @@ defmodule Prehen.Integration.WebInboxTest do
            ] = history
   end
 
-  test "stops a live inbox session even when projection state is missing", %{workspace: workspace} do
-    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "coder", "workspace" => workspace})
+  test "stops a live inbox session even when projection state is missing" do
+    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "coder"})
     assert %{"session_id" => session_id, "status" => "attached"} = json_response(conn, 201)
 
     on_exit(fn -> cleanup_session(session_id) end)
@@ -295,10 +304,8 @@ defmodule Prehen.Integration.WebInboxTest do
   end
 
   test "recreates retained row on idempotent delete when registry is already terminal and projection is missing",
-       %{
-         workspace: workspace
-       } do
-    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "coder", "workspace" => workspace})
+       %{} do
+    conn = post(build_conn(), "/inbox/sessions", %{"agent" => "coder"})
     assert %{"session_id" => session_id, "status" => "attached"} = json_response(conn, 201)
 
     on_exit(fn -> cleanup_session(session_id) end)
@@ -381,4 +388,25 @@ defmodule Prehen.Integration.WebInboxTest do
     _ = Prehen.Client.Surface.stop_session(session_id)
     :ok
   end
+
+  defp write_profile_home!(prehen_home, profile_name) do
+    profile_dir = profile_workspace(prehen_home, profile_name)
+    File.mkdir_p!(profile_dir)
+    File.write!(Path.join(profile_dir, "SOUL.md"), "SOUL for #{profile_name}.\n")
+    File.write!(Path.join(profile_dir, "AGENTS.md"), "AGENTS for #{profile_name}.\n")
+  end
+
+  defp profile_workspace(prehen_home, profile_name) do
+    Path.join([prehen_home, "profiles", profile_name])
+  end
+
+  defp tmp_prehen_home(label) do
+    Path.join(
+      System.tmp_dir!(),
+      "prehen_web_inbox_#{label}_#{System.unique_integer([:positive])}"
+    )
+  end
+
+  defp restore_prehen_home(nil), do: System.delete_env("PREHEN_HOME")
+  defp restore_prehen_home(value), do: System.put_env("PREHEN_HOME", value)
 end

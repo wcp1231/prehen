@@ -17,17 +17,6 @@ if config_env() == :prod do
 end
 
 config :prehen,
-  agent_profiles: [
-    %{
-      name: "coder",
-      label: "Coder",
-      implementation: "pi_coding_agent",
-      default_provider: "github-copilot",
-      default_model: "gpt-5.4-mini",
-      prompt_profile: "coder_default",
-      workspace_policy: %{mode: "scoped"}
-    }
-  ],
   agent_implementations: [
     %{
       name: "pi_coding_agent",

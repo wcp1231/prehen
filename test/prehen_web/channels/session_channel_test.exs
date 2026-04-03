@@ -6,14 +6,19 @@ defmodule PrehenWeb.SessionChannelTest do
 
   setup do
     original = PiAgentFixture.replace_registry!(PiAgentFixture.registry_state("coder"))
-    workspace = PiAgentFixture.workspace!("session_channel")
+    prehen_home = tmp_prehen_home("session_channel")
+    previous_prehen_home = System.get_env("PREHEN_HOME")
+
+    System.put_env("PREHEN_HOME", prehen_home)
+    write_profile_home!(prehen_home, "coder")
 
     on_exit(fn ->
       PiAgentFixture.restore_registry!(original)
-      File.rm_rf(workspace)
+      restore_prehen_home(previous_prehen_home)
+      File.rm_rf(prehen_home)
     end)
 
-    {:ok, workspace: workspace}
+    {:ok, prehen_home: prehen_home}
   end
 
   test "forwards gateway envelopes as event pushes on handle_info" do
@@ -224,9 +229,9 @@ defmodule PrehenWeb.SessionChannelTest do
     })
   end
 
-  test "returns a submit ack payload the inbox browser can correlate", %{workspace: workspace} do
+  test "returns a submit ack payload the inbox browser can correlate" do
     assert {:ok, %{session_id: session_id}} =
-             Prehen.Client.Surface.create_session(agent: "coder", workspace: workspace)
+             Prehen.Client.Surface.create_session(agent: "coder")
 
     on_exit(fn -> Prehen.Client.Surface.stop_session(session_id) end)
 
@@ -359,4 +364,21 @@ defmodule PrehenWeb.SessionChannelTest do
 
     assert returned_socket.assigns.session_id == "gw_crashed_terminal"
   end
+
+  defp write_profile_home!(prehen_home, profile_name) do
+    profile_dir = Path.join([prehen_home, "profiles", profile_name])
+    File.mkdir_p!(profile_dir)
+    File.write!(Path.join(profile_dir, "SOUL.md"), "SOUL for #{profile_name}.\n")
+    File.write!(Path.join(profile_dir, "AGENTS.md"), "AGENTS for #{profile_name}.\n")
+  end
+
+  defp tmp_prehen_home(label) do
+    Path.join(
+      System.tmp_dir!(),
+      "prehen_session_channel_#{label}_#{System.unique_integer([:positive])}"
+    )
+  end
+
+  defp restore_prehen_home(nil), do: System.delete_env("PREHEN_HOME")
+  defp restore_prehen_home(value), do: System.put_env("PREHEN_HOME", value)
 end

@@ -22,7 +22,8 @@ defmodule Prehen.Client.Surface do
   alias Prehen.Gateway.Router
   alias Prehen.Gateway.SessionRegistry
   alias Prehen.Gateway.SessionWorker
-  alias Prehen.Workspaces
+  alias Prehen.ProfileEnvironment
+  alias Prehen.PromptBuilder
 
   @doc """
   创建会话并返回客户端需要的最小标识信息。
@@ -286,29 +287,44 @@ defmodule Prehen.Client.Surface do
   defp normalize_session_id(session_id), do: to_string(session_id)
 
   defp resolve_session_config(%Profile{} = profile, opts) do
-    with {:ok, implementation} <- implementation_from_profile(profile),
-         {:ok, workspace} <- resolve_workspace(profile, opts) do
+    with :ok <- reject_workspace_override(opts),
+         {:ok, profile_environment} <-
+           ProfileEnvironment.load(profile, prehen_home: Keyword.get(opts, :prehen_home)),
+         {:ok, implementation} <- implementation_from_profile(profile) do
+      provider =
+        normalize_optional_string(Keyword.get(opts, :provider)) || profile.default_provider
+
+      model = normalize_optional_string(Keyword.get(opts, :model)) || profile.default_model
+
+      prompt_profile =
+        normalize_optional_string(Keyword.get(opts, :prompt_profile)) || profile.prompt_profile
+
+      system_prompt =
+        PromptBuilder.build(
+          profile_environment,
+          %{profile_name: profile.name, provider: provider, model: model},
+          default_capabilities()
+        )
+
       {:ok,
        %SessionConfig{
          profile_name: profile.name,
-         provider:
-           normalize_optional_string(Keyword.get(opts, :provider)) || profile.default_provider,
-         model: normalize_optional_string(Keyword.get(opts, :model)) || profile.default_model,
-         prompt_profile:
-           normalize_optional_string(Keyword.get(opts, :prompt_profile)) || profile.prompt_profile,
+         provider: provider,
+         model: model,
+         prompt_profile: prompt_profile,
          workspace_policy: profile.workspace_policy,
          implementation: implementation,
-         workspace: workspace
+         workspace: profile_environment.workspace_dir,
+         profile_dir: profile_environment.profile_dir,
+         system_prompt: system_prompt
        }}
     end
   end
 
-  defp resolve_workspace(%Profile{} = profile, opts) do
-    workspace = normalize_optional_string(Keyword.get(opts, :workspace))
-
-    case Workspaces.resolve(workspace, profile.name) do
-      {:ok, resolved_workspace} -> {:ok, resolved_workspace}
-      {:error, reason} -> {:error, {:workspace_unavailable, reason}}
+  defp reject_workspace_override(opts) do
+    case normalize_optional_string(Keyword.get(opts, :workspace)) do
+      nil -> :ok
+      _workspace -> {:error, :workspace_override_not_supported}
     end
   end
 
@@ -352,6 +368,10 @@ defmodule Prehen.Client.Surface do
   end
 
   defp normalize_optional_string(_value), do: nil
+
+  defp default_capabilities do
+    %{skills: ["skills.search", "skills.load"]}
+  end
 
   defp error_payload(type, reason) do
     %{

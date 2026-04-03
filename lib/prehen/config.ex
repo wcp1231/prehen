@@ -1,12 +1,16 @@
 defmodule Prehen.Config do
   @moduledoc false
 
+  require Logger
+
   alias Prehen.Agents.Implementation
   alias Prehen.Agents.Profile
   alias Prehen.Agents.SessionConfig
+  alias Prehen.UserConfig
 
   @default_timeout_ms 15_000
   @default_pi_coding_agent_command "pi-coding-agent"
+  @default_workspace_policy %{mode: "scoped"}
 
   @spec load(keyword()) :: map()
   def load(overrides \\ []) do
@@ -32,8 +36,7 @@ defmodule Prehen.Config do
       prompt_profile:
         normalize_optional_string(Keyword.get(opts, :prompt_profile)) || profile.prompt_profile,
       workspace_policy: profile.workspace_policy,
-      implementation: implementation,
-      workspace: normalize_optional_string(Keyword.get(opts, :workspace))
+      implementation: implementation
     }
   end
 
@@ -81,10 +84,45 @@ defmodule Prehen.Config do
   defp parse_bool(value, _default) when value in ["0", "false", "FALSE", "no", "NO"], do: false
   defp parse_bool(_value, default), do: default
 
+  defp load_user_config(overrides) do
+    if Keyword.has_key?(overrides, :user_config) do
+      overrides
+      |> Keyword.fetch!(:user_config)
+      |> UserConfig.normalize()
+    else
+      opts =
+        case Keyword.get(overrides, :prehen_home) do
+          nil -> []
+          root -> [root: root]
+        end
+
+      case UserConfig.load(opts) do
+        {:ok, user_config} ->
+          user_config
+
+        {:error, %YamlElixir.FileNotFoundError{}} ->
+          UserConfig.empty()
+
+        {:error, reason} ->
+          Logger.warning("Failed to load Prehen user config: #{format_error(reason)}")
+          UserConfig.empty()
+      end
+    end
+  end
+
   defp agent_profiles_config(overrides) do
-    overrides
-    |> Keyword.get(:agent_profiles, Application.get_env(:prehen, :agent_profiles, []))
-    |> normalize_agent_profiles()
+    if Keyword.has_key?(overrides, :agent_profiles) do
+      overrides
+      |> Keyword.fetch!(:agent_profiles)
+      |> normalize_agent_profiles()
+    else
+      user_config = load_user_config(overrides)
+
+      user_config
+      |> Map.get(:profiles, [])
+      |> bridge_user_profiles()
+      |> normalize_agent_profiles()
+    end
   end
 
   defp agent_implementations_config(overrides) do
@@ -128,6 +166,47 @@ defmodule Prehen.Config do
   end
 
   defp normalize_agent_profiles(_profiles), do: []
+
+  defp bridge_user_profiles(profiles) when is_list(profiles) do
+    Enum.reduce(profiles, [], fn profile, acc ->
+      case bridge_user_profile(profile) do
+        {:ok, bridged_profile} ->
+          [bridged_profile | acc]
+
+        {:drop, reason} ->
+          log_dropped_user_profile(profile, reason)
+          acc
+      end
+    end)
+    |> Enum.reverse()
+  end
+
+  defp bridge_user_profiles(_profiles), do: []
+
+  defp bridge_user_profile(profile) when is_map(profile) do
+    with :ok <- enabled_profile(profile),
+         {:ok, name} <- required_user_string(profile, :id),
+         {:ok, label} <- required_user_string(profile, :label),
+         {:ok, implementation} <- user_runtime_implementation(profile),
+         {:ok, default_provider} <- required_user_string(profile, :default_provider),
+         {:ok, default_model} <- required_user_string(profile, :default_model) do
+      {:ok,
+       %{
+         name: name,
+         label: label,
+         description: normalize_optional_string(fetch_attr(profile, :description)),
+         implementation: implementation,
+         default_provider: default_provider,
+         default_model: default_model,
+         prompt_profile: default_prompt_profile(name),
+         workspace_policy: @default_workspace_policy
+       }}
+    else
+      {:error, reason} -> {:drop, reason}
+    end
+  end
+
+  defp bridge_user_profile(_profile), do: {:drop, :invalid_profile}
 
   defp normalize_agent_implementations(%{} = implementations) do
     implementations
@@ -211,7 +290,11 @@ defmodule Prehen.Config do
   end
 
   defp fetch_attr(attrs, key) do
-    Map.get(attrs, key) || Map.get(attrs, Atom.to_string(key))
+    if Map.has_key?(attrs, key) do
+      Map.get(attrs, key)
+    else
+      Map.get(attrs, Atom.to_string(key))
+    end
   end
 
   defp required_string(attrs, key) do
@@ -242,6 +325,22 @@ defmodule Prehen.Config do
     end
   end
 
+  defp required_user_string(attrs, key) do
+    case normalize_optional_string(fetch_attr(attrs, key)) do
+      nil -> {:error, {:missing_field, key}}
+      value -> {:ok, value}
+    end
+  end
+
+  defp user_runtime_implementation(profile) do
+    case normalize_optional_string(fetch_attr(profile, :runtime)) do
+      "pi" -> {:ok, "pi_coding_agent"}
+      runtime -> {:error, {:unsupported_runtime, runtime}}
+    end
+  end
+
+  defp normalize_optional_string(nil), do: nil
+
   defp normalize_optional_string(value) when is_binary(value) do
     case String.trim(value) do
       "" -> nil
@@ -249,7 +348,49 @@ defmodule Prehen.Config do
     end
   end
 
+  defp normalize_optional_string(value) when is_atom(value), do: to_string(value)
   defp normalize_optional_string(_value), do: nil
+
+  defp default_prompt_profile(name), do: "#{name}_default"
+
+  defp enabled_profile(profile) do
+    if normalize_enabled(fetch_attr(profile, :enabled)) do
+      :ok
+    else
+      {:error, :disabled}
+    end
+  end
+
+  defp normalize_enabled(value) when value in [true, false], do: value
+  defp normalize_enabled(value) when value in ["true", "TRUE", "yes", "YES", "1"], do: true
+  defp normalize_enabled(value) when value in ["false", "FALSE", "no", "NO", "0"], do: false
+  defp normalize_enabled(_value), do: true
+
+  defp log_dropped_user_profile(_profile, :disabled), do: :ok
+
+  defp log_dropped_user_profile(profile, reason) do
+    Logger.warning(
+      "Dropped user profile #{inspect(user_profile_ref(profile))}: #{format_drop_reason(reason)}"
+    )
+  end
+
+  defp user_profile_ref(profile) do
+    normalize_optional_string(fetch_attr(profile, :id)) ||
+      normalize_optional_string(fetch_attr(profile, :label)) ||
+      "<unknown>"
+  end
+
+  defp format_drop_reason(:disabled), do: "disabled"
+  defp format_drop_reason(:invalid_profile), do: "invalid profile"
+  defp format_drop_reason({:missing_field, key}), do: "missing required field #{key}"
+
+  defp format_drop_reason({:unsupported_runtime, runtime}),
+    do: "unsupported runtime #{inspect(runtime)}"
+
+  defp format_drop_reason(other), do: inspect(other)
+
+  defp format_error(%_{} = error) when is_exception(error), do: Exception.message(error)
+  defp format_error(error), do: inspect(error)
 
   defp resolve_implementation!(implementations, implementation_name) do
     Enum.find(implementations, fn

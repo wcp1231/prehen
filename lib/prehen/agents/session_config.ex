@@ -9,7 +9,9 @@ defmodule Prehen.Agents.SessionConfig do
     :prompt_profile,
     :workspace_policy,
     :implementation,
-    :workspace
+    :workspace,
+    :profile_dir,
+    :system_prompt
   ]
 
   @type t :: %__MODULE__{
@@ -19,6 +21,8 @@ defmodule Prehen.Agents.SessionConfig do
           prompt_profile: String.t(),
           workspace_policy: map() | nil,
           implementation: module() | struct() | map() | nil,
-          workspace: String.t() | nil
+          workspace: String.t() | nil,
+          profile_dir: String.t() | nil,
+          system_prompt: String.t() | nil
         }
 end

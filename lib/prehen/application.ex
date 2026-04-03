@@ -22,6 +22,7 @@ defmodule Prehen.Application do
 
     children = [
       {Phoenix.PubSub, name: Prehen.PubSub},
+      Prehen.MCP.SessionAuth,
       {Prehen.Gateway.Supervisor, gateway_opts(config)},
       {Prehen.Observability.TraceCollector, []},
       PrehenWeb.Endpoint

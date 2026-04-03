@@ -8,6 +8,7 @@ defmodule Prehen.Gateway.SessionWorker do
   alias Prehen.Agents.SessionConfig
   alias Prehen.Gateway.InboxProjection
   alias Prehen.Gateway.SessionRegistry
+  alias Prehen.MCP.SessionAuth
   alias Prehen.Observability.TraceCollector
 
   @recv_poll_timeout_ms 100
@@ -62,6 +63,10 @@ defmodule Prehen.Gateway.SessionWorker do
     GenServer.call(worker, {:submit_message, attrs})
   end
 
+  def mcp_context(worker) when is_pid(worker) do
+    GenServer.call(worker, :mcp_context)
+  end
+
   @impl true
   def init(opts) do
     Process.flag(:trap_exit, true)
@@ -73,10 +78,17 @@ defmodule Prehen.Gateway.SessionWorker do
 
     with {:ok, wrapper_module} <- wrapper_module(session_config),
          {:ok, wrapper} <-
-           wrapper_module.start_link(session_config: session_config, test_pid: test_pid) do
+           wrapper_module.start_link(session_config: session_config, test_pid: test_pid),
+         {:ok, mcp_url} <- mcp_url(),
+         {:ok, mcp_token} <-
+           SessionAuth.issue(
+             gateway_session_id,
+             session_config.profile_name,
+             capabilities: mcp_capabilities()
+           ) do
       case wrapper_module.open_session(
              wrapper,
-             open_session_attrs(session_config, gateway_session_id)
+             open_session_attrs(session_config, gateway_session_id, mcp_url, mcp_token)
            ) do
         {:ok, opened} ->
           with {:ok, agent_session_id} <- fetch_agent_session_id(opened),
@@ -116,19 +128,28 @@ defmodule Prehen.Gateway.SessionWorker do
                receiver: receiver,
                test_pid: test_pid,
                seq: 0,
-               session_config: session_config
+               session_config: session_config,
+               mcp_token: mcp_token,
+               mcp_context: %{
+                 session_id: gateway_session_id,
+                 profile_id: session_config.profile_name,
+                 capabilities: mcp_capabilities()
+               }
              }}
           else
             {:error, reason} ->
+              SessionAuth.invalidate(mcp_token)
               safe_stop_wrapper(wrapper_module, wrapper)
               {:stop, reason}
           end
 
         {:error, reason} ->
+          SessionAuth.invalidate(mcp_token)
           safe_stop_wrapper(wrapper_module, wrapper)
           {:stop, reason}
 
         other ->
+          SessionAuth.invalidate(mcp_token)
           safe_stop_wrapper(wrapper_module, wrapper)
           {:stop, other}
       end
@@ -156,6 +177,19 @@ defmodule Prehen.Gateway.SessionWorker do
       {:error, reason} ->
         {:reply, {:error, reason}, state}
     end
+  end
+
+  def handle_call(:mcp_context, _from, state) do
+    reply =
+      case {Map.get(state, :mcp_token), Map.get(state, :mcp_context)} do
+        {token, context} when is_binary(token) and token != "" and is_map(context) ->
+          {:ok, %{token: token, context: context}}
+
+        _ ->
+          {:error, :not_found}
+      end
+
+    {:reply, reply, state}
   end
 
   @impl true
@@ -196,6 +230,8 @@ defmodule Prehen.Gateway.SessionWorker do
   @impl true
   def terminate(reason, state) do
     terminal_status = terminal_status(reason)
+
+    :ok = maybe_invalidate_mcp_token(state)
 
     TraceCollector.record_sync(%{
       type: "agent.stopped",
@@ -278,6 +314,12 @@ defmodule Prehen.Gateway.SessionWorker do
   end
 
   defp safe_stop_wrapper(_wrapper_module, _wrapper), do: :ok
+
+  defp maybe_invalidate_mcp_token(%{mcp_token: token}) when is_binary(token) and token != "" do
+    SessionAuth.invalidate(token)
+  end
+
+  defp maybe_invalidate_mcp_token(_state), do: :ok
 
   defp project_wrapper_frame(session_id, "session.output.delta", payload) when is_map(payload) do
     with {:ok, message_id} <- fetch_optional_binary(payload, "message_id"),
@@ -377,7 +419,7 @@ defmodule Prehen.Gateway.SessionWorker do
 
   defp fetch_agent_session_id(_opened), do: {:error, :missing_agent_session_id}
 
-  defp open_session_attrs(%SessionConfig{} = session_config, gateway_session_id) do
+  defp open_session_attrs(%SessionConfig{} = session_config, gateway_session_id, mcp_url, mcp_token) do
     %{
       gateway_session_id: gateway_session_id,
       agent: session_config.profile_name,
@@ -386,6 +428,8 @@ defmodule Prehen.Gateway.SessionWorker do
       model: session_config.model,
       prompt_profile: session_config.prompt_profile,
       workspace: session_config.workspace,
+      mcp_url: mcp_url,
+      mcp_token: mcp_token,
       prompt: prompt_context(session_config)
     }
   end
@@ -397,7 +441,11 @@ defmodule Prehen.Gateway.SessionWorker do
         _ -> %{}
       end
 
-    PromptContext.build(session_config, workspace: workspace)
+    PromptContext.build(
+      session_config,
+      workspace: workspace,
+      capabilities: %{skills: mcp_capabilities()}
+    )
   end
 
   defp route_state(%SessionConfig{} = session_config, gateway_session_id, attrs) do
@@ -425,5 +473,18 @@ defmodule Prehen.Gateway.SessionWorker do
 
   defp gen_gateway_session_id do
     "gw_" <> Integer.to_string(System.unique_integer([:positive]))
+  end
+
+  defp mcp_capabilities do
+    ["skills.search", "skills.load"]
+    |> Enum.sort()
+  end
+
+  defp mcp_url do
+    endpoint_config = Application.get_env(:prehen, PrehenWeb.Endpoint, [])
+    http = Keyword.get(endpoint_config, :http, [])
+    port = Keyword.get(http, :port, 4000)
+
+    {:ok, URI.to_string(%URI{scheme: "http", host: "127.0.0.1", port: port, path: "/mcp"})}
   end
 end

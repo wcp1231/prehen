@@ -5,22 +5,44 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
   alias Prehen.Agents.SessionConfig
   alias Prehen.Agents.Wrappers.PiCodingAgent
 
-  test "maps session policy into the pi-coding-agent launch contract" do
+  test "build_launch_spec uses the fixed profile workspace and injected system prompt" do
+    profile_dir = tmp_workspace_path("fixed_profile_workspace")
+
     session_config =
       %SessionConfig{
         profile_name: "coder",
-        provider: "openai",
-        model: "gpt-5",
+        provider: "github-copilot",
+        model: "gpt-5.4-mini",
         prompt_profile: "coder_default",
-        workspace: "/tmp/prehen_pi_workspace"
+        workspace: tmp_workspace_path("ignored_workspace_override"),
+        profile_dir: profile_dir,
+        system_prompt: "PREHEN GLOBAL\n\nSOUL\n\nAGENTS"
       }
-      |> Map.put(:prompt_context, "You are Prehen coder.")
+      |> Map.put(:implementation, fake_pi_implementation())
 
     assert {:ok, launch} = PiCodingAgent.build_launch_spec(session_config)
-    assert launch.cwd == "/tmp/prehen_pi_workspace"
-    assert launch.env["PREHEN_PROVIDER"] == "openai"
-    assert launch.env["PREHEN_MODEL"] == "gpt-5"
-    assert launch.prompt_payload =~ "You are Prehen coder."
+    assert launch.cwd == profile_dir
+    assert launch.env["PREHEN_PROVIDER"] == "github-copilot"
+    assert launch.env["PREHEN_MODEL"] == "gpt-5.4-mini"
+    refute Map.has_key?(launch.env, "PREHEN_PROMPT")
+    assert launch.mcp_status == :contract_unavailable
+
+    assert launch.runtime_args == [
+             "-lc",
+             "cd \"$1\" && shift && exec \"$@\"",
+             "prehen-pi",
+             profile_dir,
+             python_command(),
+             fake_pi_script_path(),
+             "--mode",
+             "json",
+             "--provider",
+             "github-copilot",
+             "--model",
+             "gpt-5.4-mini",
+             "--append-system-prompt",
+             "PREHEN GLOBAL\n\nSOUL\n\nAGENTS"
+           ]
   end
 
   test "build_launch_spec enforces json mode and session-selected provider model" do
@@ -39,9 +61,10 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
         provider: "openai",
         model: "gpt-5",
         prompt_profile: "coder_default",
-        workspace: "/tmp/prehen_pi_workspace"
+        workspace: "/tmp/prehen_pi_workspace",
+        profile_dir: "/tmp/prehen_pi_workspace",
+        system_prompt: "You are Prehen coder."
       }
-      |> Map.put(:prompt_context, "You are Prehen coder.")
 
     assert {:ok, launch} = PiCodingAgent.build_launch_spec(session_config)
 
@@ -58,8 +81,68 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
              "--model",
              "gpt-5",
              "--sandbox",
-             "workspace-write"
+             "workspace-write",
+             "--append-system-prompt",
+             "You are Prehen coder."
            ]
+  end
+
+  test "build_launch_spec injects MCP HTTP flags when pi advertises flag-based ingestion" do
+    workspace = tmp_workspace_path("mcp_http_flags")
+
+    session_config =
+      session_config(workspace,
+        implementation: fake_pi_implementation(%{"FAKE_PI_HELP_CONTRACT" => "http_flags"}),
+        mcp_url: "http://127.0.0.1:4010/mcp",
+        mcp_token: "token_flags"
+      )
+
+    assert {:ok, launch} = PiCodingAgent.build_launch_spec(session_config)
+
+    assert launch.mcp_status == :configured
+    assert launch.runtime_args |> Enum.join(" ") =~ "--mcp-url http://127.0.0.1:4010/mcp"
+    assert launch.runtime_args |> Enum.join(" ") =~ "--mcp-bearer-token token_flags"
+    refute Map.has_key?(launch.env, "PREHEN_MCP_URL")
+    refute Map.has_key?(launch.env, "PREHEN_MCP_TOKEN")
+  end
+
+  test "build_launch_spec injects MCP HTTP env when pi advertises env-based ingestion" do
+    workspace = tmp_workspace_path("mcp_http_env")
+
+    session_config =
+      session_config(workspace,
+        implementation: fake_pi_implementation(%{"FAKE_PI_HELP_CONTRACT" => "http_env"}),
+        mcp_url: "http://127.0.0.1:4020/mcp",
+        mcp_token: "token_env"
+      )
+
+    assert {:ok, launch} = PiCodingAgent.build_launch_spec(session_config)
+
+    assert launch.mcp_status == :configured
+    assert launch.env["PREHEN_MCP_URL"] == "http://127.0.0.1:4020/mcp"
+    assert launch.env["PREHEN_MCP_TOKEN"] == "token_env"
+    refute Enum.member?(launch.runtime_args, "--mcp-url")
+    refute Enum.member?(launch.runtime_args, "--mcp-bearer-token")
+  end
+
+  test "build_launch_spec classifies an unavailable MCP contract without injecting metadata" do
+    workspace = tmp_workspace_path("mcp_contract_unavailable")
+
+    session_config =
+      session_config(workspace,
+        implementation: fake_pi_implementation(%{"FAKE_PI_HELP_CONTRACT" => "none"}),
+        mcp_url: "http://127.0.0.1:4030/mcp",
+        mcp_token: "token_none"
+      )
+
+    assert {:ok, launch} = PiCodingAgent.build_launch_spec(session_config)
+
+    assert launch.mcp_status == :contract_unavailable
+    assert launch.mcp_contract == {:error, :mcp_contract_unavailable}
+    refute Enum.member?(launch.runtime_args, "--mcp-url")
+    refute Enum.member?(launch.runtime_args, "--mcp-bearer-token")
+    refute Map.has_key?(launch.env, "PREHEN_MCP_URL")
+    refute Map.has_key?(launch.env, "PREHEN_MCP_TOKEN")
   end
 
   test "open_session returns a synthetic agent_session_id without launching pi" do
@@ -149,6 +232,64 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
     ref = Process.monitor(wrapper)
     assert :ok = PiCodingAgent.stop(wrapper)
     assert_receive {:DOWN, ^ref, :process, ^wrapper, _reason}, 1_000
+  end
+
+  test "send_message passes system prompt and MCP launch flags to the process" do
+    workspace = tmp_workspace_path("capture_launch_contract")
+    capture_path = Path.join(workspace, "launch_capture.json")
+
+    session_config =
+      session_config(workspace,
+        implementation:
+          fake_pi_implementation(%{
+            "FAKE_PI_HELP_CONTRACT" => "http_flags",
+            "FAKE_PI_CAPTURE_PATH" => capture_path
+          }),
+        system_prompt: "PREHEN GLOBAL\n\nSOUL\n\nAGENTS",
+        mcp_url: "http://127.0.0.1:4040/mcp",
+        mcp_token: "token_capture"
+      )
+
+    assert {:ok, wrapper} = PiCodingAgent.start_link(session_config: session_config)
+
+    assert {:ok, %{agent_session_id: agent_session_id}} =
+             PiCodingAgent.open_session(wrapper, %{
+               gateway_session_id: "gw_capture_launch_contract",
+               provider: "openai",
+               model: "gpt-5",
+               prompt_profile: "coder_default",
+               workspace: tmp_workspace_path("ignored_runtime_workspace")
+             })
+
+    assert :ok =
+             PiCodingAgent.send_message(wrapper, %{
+               agent_session_id: agent_session_id,
+               message_id: "msg_capture_launch_contract",
+               parts: [%{type: "text", text: "ping"}]
+             })
+
+    assert {:ok,
+            %{
+              "type" => "session.output.delta",
+              "payload" => %{
+                "message_id" => "msg_capture_launch_contract",
+                "text" => "echo:ping"
+              }
+            }} =
+             PiCodingAgent.recv_event(wrapper, 1_000)
+
+    assert {:ok,
+            %{
+              "type" => "session.output.completed",
+              "payload" => %{"message_id" => "msg_capture_launch_contract"}
+            }} =
+             PiCodingAgent.recv_event(wrapper, 1_000)
+
+    assert {:ok, capture} = capture_launch(capture_path)
+    assert capture["cwd"] in [workspace, "/private" <> workspace]
+    assert capture["system_prompt"] == "PREHEN GLOBAL\n\nSOUL\n\nAGENTS"
+    assert capture["mcp_url_arg"] == "http://127.0.0.1:4040/mcp"
+    assert capture["mcp_token_arg"] == "token_capture"
   end
 
   test "ignores pi message lifecycle events that do not carry assistant output" do
@@ -622,7 +763,6 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
       session_config(tmp_workspace_path("support_check_ok"),
         implementation: fake_pi_implementation()
       )
-      |> Map.put(:prompt_context, "You are Prehen coder.")
 
     assert :ok = PiCodingAgent.support_check(session_config)
   end
@@ -632,7 +772,6 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
       session_config(tmp_workspace_path("support_check_wait_for_eof"),
         implementation: fake_pi_implementation(%{"FAKE_PI_MODE" => "wait_for_eof_before_header"})
       )
-      |> Map.put(:prompt_context, "You are Prehen coder.")
 
     assert :ok = PiCodingAgent.support_check(session_config)
   end
@@ -642,7 +781,6 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
       session_config(tmp_workspace_path("support_check_message_lifecycle"),
         implementation: fake_pi_implementation(%{"FAKE_PI_MODE" => "message_lifecycle"})
       )
-      |> Map.put(:prompt_context, "You are Prehen coder.")
 
     assert :ok = PiCodingAgent.support_check(session_config)
   end
@@ -652,7 +790,6 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
       session_config(tmp_workspace_path("support_check_delayed_nonzero"),
         implementation: fake_pi_implementation(%{"FAKE_PI_MODE" => "delayed_nonzero"})
       )
-      |> Map.put(:prompt_context, "You are Prehen coder.")
 
     assert :ok = PiCodingAgent.support_check(session_config)
   end
@@ -662,7 +799,6 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
       session_config(tmp_workspace_path("support_check_event_then_nonzero"),
         implementation: fake_pi_implementation(%{"FAKE_PI_MODE" => "event_then_nonzero"})
       )
-      |> Map.put(:prompt_context, "You are Prehen coder.")
 
     assert {:error, :contract_failed} = PiCodingAgent.support_check(session_config)
   end
@@ -675,7 +811,6 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
       session_config(tmp_workspace_path("support_check_mailbox_clean"),
         implementation: fake_pi_implementation(%{"FAKE_PI_MODE" => "delayed_nonzero"})
       )
-      |> Map.put(:prompt_context, "You are Prehen coder.")
 
     assert :ok = PiCodingAgent.support_check(session_config)
     refute_receive {:executable_host, _, _}, 200
@@ -687,7 +822,6 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
       session_config(tmp_workspace_path("support_check_immediate_nonzero"),
         implementation: fake_pi_implementation(%{"FAKE_PI_MODE" => "nonzero_exit"})
       )
-      |> Map.put(:prompt_context, "You are Prehen coder.")
 
     assert {:error, :contract_failed} = PiCodingAgent.support_check(session_config)
   end
@@ -697,7 +831,6 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
       session_config(tmp_workspace_path("support_check_unknown_event"),
         implementation: fake_pi_implementation(%{"FAKE_PI_MODE" => "unknown_event_then_nonzero"})
       )
-      |> Map.put(:prompt_context, "You are Prehen coder.")
 
     assert {:error, :contract_failed} = PiCodingAgent.support_check(session_config)
   end
@@ -708,7 +841,6 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
         tmp_workspace_path("invalid_header"),
         implementation: fake_pi_implementation(%{"FAKE_PI_MODE" => "invalid_header"})
       )
-      |> Map.put(:prompt_context, "You are Prehen coder.")
 
     assert {:error, :contract_failed} = PiCodingAgent.support_check(session_config)
   end
@@ -719,7 +851,7 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
     session_config =
       session_config(workspace,
         implementation: fake_pi_implementation(),
-        prompt_context: "You are Prehen coder."
+        system_prompt: "You are Prehen coder."
       )
       |> Map.put(:workspace_policy, %{mode: "disabled"})
 
@@ -730,7 +862,7 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
     session_config =
       session_config("relative/workspace",
         implementation: fake_pi_implementation(),
-        prompt_context: "You are Prehen coder."
+        system_prompt: "You are Prehen coder."
       )
 
     assert {:error, :capability_failed} = PiCodingAgent.support_check(session_config)
@@ -750,7 +882,7 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
     session_config =
       session_config(workspace,
         implementation: implementation,
-        prompt_context: "You are Prehen coder."
+        system_prompt: "You are Prehen coder."
       )
 
     assert {:error, :launch_failed} = PiCodingAgent.support_check(session_config)
@@ -758,6 +890,9 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
 
   defp session_config(workspace, opts) do
     implementation = Keyword.get(opts, :implementation)
+    system_prompt =
+      Keyword.get(opts, :system_prompt) || Keyword.get(opts, :prompt_context) ||
+        "You are Prehen coder."
 
     %SessionConfig{
       profile_name: "coder",
@@ -765,9 +900,12 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
       provider: "openai",
       model: "gpt-5",
       prompt_profile: "coder_default",
-      workspace: workspace
+      workspace: workspace,
+      profile_dir: Keyword.get(opts, :profile_dir, workspace),
+      system_prompt: system_prompt
     }
-    |> Map.put(:prompt_context, Keyword.get(opts, :prompt_context))
+    |> maybe_put_extra_field(:mcp_url, Keyword.get(opts, :mcp_url))
+    |> maybe_put_extra_field(:mcp_token, Keyword.get(opts, :mcp_token))
   end
 
   defp fake_pi_implementation(extra_env \\ %{}) do
@@ -799,5 +937,15 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgentTest do
     on_exit(fn -> File.rm_rf(workspace) end)
 
     workspace
+  end
+
+  defp maybe_put_extra_field(session_config, _key, nil), do: session_config
+  defp maybe_put_extra_field(session_config, key, value), do: Map.put(session_config, key, value)
+
+  defp capture_launch(path) do
+    with {:ok, body} <- File.read(path),
+         {:ok, payload} <- Jason.decode(body) do
+      {:ok, payload}
+    end
   end
 end

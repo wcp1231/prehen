@@ -4,10 +4,10 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
   use GenServer
 
   alias Prehen.Agents.Implementation
-  alias Prehen.Agents.PromptContext
   alias Prehen.Agents.SessionConfig
   alias Prehen.Agents.Wrapper
   alias Prehen.Agents.Wrappers.ExecutableHost
+  alias Prehen.Agents.Wrappers.PiLaunchContract
   alias Prehen.Config
 
   @behaviour Wrapper
@@ -69,9 +69,16 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
            fetch_required_string(session_config, :prompt_profile, :capability_failed),
          {:ok, workspace} <- workspace_root(session_config),
          :ok <- ensure_workspace(workspace),
-         {:ok, prompt_payload} <- prompt_payload(session_config, workspace),
+         {:ok, system_prompt} <- system_prompt(session_config),
          {:ok, command, args, env} <- implementation_command_spec(session_config) do
-      runtime_launch_args = normalize_pi_launch_args(args, provider, model)
+      {launcher_prefix, _option_args} = split_pi_launcher_prefix(args)
+      mcp_launch = mcp_launch(command, launcher_prefix, env, session_config)
+
+      runtime_launch_args =
+        normalize_pi_launch_args(args, provider, model) ++
+          ["--append-system-prompt", system_prompt] ++
+          mcp_launch.args
+
       {runtime_command, runtime_args} = runtime_command(command, runtime_launch_args, workspace)
 
       {:ok,
@@ -81,16 +88,18 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
          runtime_command: runtime_command,
          runtime_args: runtime_args,
          cwd: workspace,
-         prompt_payload: prompt_payload,
+         system_prompt: system_prompt,
+         mcp_contract: mcp_launch.contract,
+         mcp_status: mcp_launch.status,
          env:
            env
            |> Map.merge(%{
              "PREHEN_PROVIDER" => provider,
              "PREHEN_MODEL" => model,
              "PREHEN_PROMPT_PROFILE" => prompt_profile,
-             "PREHEN_WORKSPACE" => workspace,
-             "PREHEN_PROMPT" => prompt_payload
+             "PREHEN_WORKSPACE" => workspace
            })
+           |> Map.merge(mcp_launch.env)
            |> normalize_env()
        }}
     end
@@ -246,7 +255,8 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
       |> put_session_override(:provider, attrs)
       |> put_session_override(:model, attrs)
       |> put_session_override(:prompt_profile, attrs)
-      |> put_session_override(:workspace, attrs)
+      |> put_session_override(:mcp_url, attrs)
+      |> put_session_override(:mcp_token, attrs)
 
     {:ok, session_config}
   end
@@ -881,6 +891,15 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
   defp strip_pi_launch_overrides(["--model", _value | rest], acc),
     do: strip_pi_launch_overrides(rest, acc)
 
+  defp strip_pi_launch_overrides(["--append-system-prompt", _value | rest], acc),
+    do: strip_pi_launch_overrides(rest, acc)
+
+  defp strip_pi_launch_overrides(["--mcp-url", _value | rest], acc),
+    do: strip_pi_launch_overrides(rest, acc)
+
+  defp strip_pi_launch_overrides(["--mcp-bearer-token", _value | rest], acc),
+    do: strip_pi_launch_overrides(rest, acc)
+
   defp strip_pi_launch_overrides([<<"--mode=", _value::binary>> | rest], acc),
     do: strip_pi_launch_overrides(rest, acc)
 
@@ -890,13 +909,24 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
   defp strip_pi_launch_overrides([<<"--model=", _value::binary>> | rest], acc),
     do: strip_pi_launch_overrides(rest, acc)
 
+  defp strip_pi_launch_overrides([<<"--append-system-prompt=", _value::binary>> | rest], acc),
+    do: strip_pi_launch_overrides(rest, acc)
+
+  defp strip_pi_launch_overrides([<<"--mcp-url=", _value::binary>> | rest], acc),
+    do: strip_pi_launch_overrides(rest, acc)
+
+  defp strip_pi_launch_overrides([<<"--mcp-bearer-token=", _value::binary>> | rest], acc),
+    do: strip_pi_launch_overrides(rest, acc)
+
   defp strip_pi_launch_overrides([arg | rest], acc),
     do: strip_pi_launch_overrides(rest, [arg | acc])
 
   defp strip_pi_launch_overrides([], acc), do: Enum.reverse(acc)
 
   defp workspace_root(session_config) do
-    case normalize_optional_string(Map.get(session_config, :workspace)) do
+    session_config
+    |> fixed_workspace()
+    |> case do
       nil ->
         {:error, :capability_failed}
 
@@ -909,19 +939,62 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
     end
   end
 
-  defp prompt_payload(session_config, workspace) do
-    case normalize_optional_string(Map.get(session_config, :prompt_context)) do
-      nil ->
-        prompt =
-          session_config
-          |> normalize_session_config()
-          |> PromptContext.build(workspace: %{root_dir: workspace})
-          |> Jason.encode!()
+  defp fixed_workspace(session_config) do
+    normalize_optional_string(Map.get(session_config, :profile_dir)) ||
+      normalize_optional_string(Map.get(session_config, :workspace))
+  end
 
-        {:ok, prompt}
+  defp system_prompt(session_config) do
+    case normalize_optional_string(
+           Map.get(session_config, :system_prompt) || Map.get(session_config, :prompt_context)
+         ) do
+      nil -> {:error, :capability_failed}
+      prompt -> {:ok, prompt}
+    end
+  end
 
-      prompt ->
-        {:ok, prompt}
+  defp mcp_launch(command, launcher_prefix, env, session_config) do
+    case PiLaunchContract.detect(command, launcher_prefix, env) do
+      {:ok, contract} ->
+        apply_mcp_contract(contract, session_config)
+
+      {:error, :mcp_contract_unavailable} = error ->
+        %{args: [], env: %{}, contract: error, status: :contract_unavailable}
+
+      {:error, reason} = error ->
+        %{args: [], env: %{}, contract: error, status: {:probe_failed, reason}}
+    end
+  end
+
+  defp apply_mcp_contract({:http_flags, %{url_flag: url_flag, token_flag: token_flag}} = contract, session_config) do
+    with {:ok, mcp_url} <- fetch_required_string(session_config, :mcp_url, :mcp_metadata_unavailable),
+         {:ok, mcp_token} <-
+           fetch_required_string(session_config, :mcp_token, :mcp_metadata_unavailable) do
+      %{
+        args: [url_flag, mcp_url, token_flag, mcp_token],
+        env: %{},
+        contract: {:ok, contract},
+        status: :configured
+      }
+    else
+      {:error, :mcp_metadata_unavailable} = error ->
+        %{args: [], env: %{}, contract: {:ok, contract}, status: error}
+    end
+  end
+
+  defp apply_mcp_contract({:http_env, %{url_env: url_env, token_env: token_env}} = contract, session_config) do
+    with {:ok, mcp_url} <- fetch_required_string(session_config, :mcp_url, :mcp_metadata_unavailable),
+         {:ok, mcp_token} <-
+           fetch_required_string(session_config, :mcp_token, :mcp_metadata_unavailable) do
+      %{
+        args: [],
+        env: %{url_env => mcp_url, token_env => mcp_token},
+        contract: {:ok, contract},
+        status: :configured
+      }
+    else
+      {:error, :mcp_metadata_unavailable} = error ->
+        %{args: [], env: %{}, contract: {:ok, contract}, status: error}
     end
   end
 
@@ -949,18 +1022,6 @@ defmodule Prehen.Agents.Wrappers.PiCodingAgent do
       nil -> {:error, error_reason}
       value -> {:ok, value}
     end
-  end
-
-  defp normalize_session_config(session_config) do
-    %SessionConfig{
-      profile_name: Map.get(session_config, :profile_name),
-      provider: Map.get(session_config, :provider),
-      model: Map.get(session_config, :model),
-      prompt_profile: Map.get(session_config, :prompt_profile),
-      workspace_policy: Map.get(session_config, :workspace_policy),
-      implementation: Map.get(session_config, :implementation),
-      workspace: Map.get(session_config, :workspace)
-    }
   end
 
   defp normalize_optional_string(value) when is_binary(value) do

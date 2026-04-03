@@ -23,6 +23,10 @@ defmodule Prehen.Gateway.SessionRegistry do
     GenServer.call(__MODULE__, {:fetch_worker, gateway_session_id})
   end
 
+  def list_workers do
+    GenServer.call(__MODULE__, :list_workers)
+  end
+
   @impl true
   def init(_opts) do
     {:ok, %{}}
@@ -72,5 +76,23 @@ defmodule Prehen.Gateway.SessionRegistry do
       :error ->
         {:reply, {:error, :not_found}, state}
     end
+  end
+
+  def handle_call(:list_workers, _from, state) do
+    workers =
+      state
+      |> Map.values()
+      |> Enum.flat_map(fn
+        %{status: status} when status in [:stopped, :crashed] ->
+          []
+
+        %{worker_pid: worker_pid} when is_pid(worker_pid) ->
+          if Process.alive?(worker_pid), do: [worker_pid], else: []
+
+        _session ->
+          []
+      end)
+
+    {:reply, workers, state}
   end
 end

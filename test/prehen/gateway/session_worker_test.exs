@@ -7,6 +7,7 @@ defmodule Prehen.Gateway.SessionWorkerTest do
   alias Prehen.Gateway.InboxProjection
   alias Prehen.Gateway.SessionRegistry
   alias Prehen.Gateway.SessionWorker
+  alias Prehen.MCP.SessionAuth
   alias Prehen.TestSupport.PiAgentFixture
 
   defmodule BrokenOpenWrapper do
@@ -45,6 +46,44 @@ defmodule Prehen.Gateway.SessionWorkerTest do
     @impl true
     def handle_call({:open_session, _attrs}, _from, state) do
       {:stop, :normal, {:error, :open_failed}, state}
+    end
+  end
+
+  defmodule OpenSessionCaptureWrapper do
+    use GenServer
+
+    @behaviour Wrapper
+
+    @impl Wrapper
+    def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+    @impl Wrapper
+    def open_session(wrapper, attrs), do: GenServer.call(wrapper, {:open_session, attrs})
+
+    @impl Wrapper
+    def send_message(_wrapper, _attrs), do: :ok
+
+    @impl Wrapper
+    def send_control(_wrapper, _attrs), do: :ok
+
+    @impl Wrapper
+    def recv_event(_wrapper, _timeout), do: {:error, :closed}
+
+    @impl Wrapper
+    def support_check(_session_config), do: :ok
+
+    @impl Wrapper
+    def stop(wrapper), do: GenServer.stop(wrapper)
+
+    @impl true
+    def init(opts) do
+      {:ok, %{test_pid: Keyword.get(opts, :test_pid)}}
+    end
+
+    @impl true
+    def handle_call({:open_session, attrs}, _from, state) do
+      if is_pid(state.test_pid), do: send(state.test_pid, {:captured_open_session, attrs})
+      {:reply, {:ok, %{agent_session_id: "captured_session"}}, state}
     end
   end
 
@@ -208,6 +247,83 @@ defmodule Prehen.Gateway.SessionWorkerTest do
     assert {:error, :not_found} = SessionRegistry.fetch_worker("gw_stop")
   end
 
+  test "session lifecycle recovers MCP auth after auth server restart and tears it down on stop", %{
+    workspace: workspace
+  } do
+    assert {:ok, %{worker_pid: pid, gateway_session_id: "gw_mcp"}} =
+             SessionWorker.start_session(
+               session_config(workspace),
+               gateway_session_id: "gw_mcp",
+               test_pid: self()
+             )
+
+    state = :sys.get_state(pid)
+    token = Map.fetch!(state, :mcp_token)
+
+    assert {:ok, %{session_id: "gw_mcp", profile_id: "coder", capabilities: capabilities}} =
+             SessionAuth.lookup(token)
+
+    assert Enum.sort(capabilities) == ["skills.load", "skills.search"]
+
+    auth_pid = Process.whereis(SessionAuth)
+    auth_ref = Process.monitor(auth_pid)
+    Process.exit(auth_pid, :kill)
+    assert_receive {:DOWN, ^auth_ref, :process, ^auth_pid, :killed}, 1_000
+
+    assert {:ok, restarted_auth_pid} =
+             wait_until(fn ->
+               case Process.whereis(SessionAuth) do
+                 nil -> :retry
+                 new_pid when is_pid(new_pid) and new_pid != auth_pid -> {:ok, new_pid}
+                 _ -> :retry
+               end
+             end)
+
+    assert Process.alive?(restarted_auth_pid)
+
+    assert {:ok, %{session_id: "gw_mcp", profile_id: "coder", capabilities: recovered_capabilities}} =
+             SessionAuth.lookup(token)
+
+    assert Enum.sort(recovered_capabilities) == ["skills.load", "skills.search"]
+
+    monitor_ref = Process.monitor(pid)
+    assert :ok = DynamicSupervisor.terminate_child(Prehen.Gateway.SessionWorkerSupervisor, pid)
+    assert_receive {:DOWN, ^monitor_ref, :process, ^pid, _reason}, 1_000
+
+    assert {:error, :not_found} = SessionAuth.lookup(token)
+  end
+
+  test "passes session-scoped MCP metadata into wrapper open_session attrs", %{workspace: workspace} do
+    assert {:ok, %{worker_pid: pid, gateway_session_id: "gw_capture"}} =
+             SessionWorker.start_session(
+               session_config(
+                 workspace,
+                 implementation:
+                   implementation(
+                     name: "capture_impl",
+                     command: "capture",
+                     args: [],
+                     wrapper: OpenSessionCaptureWrapper
+                   )
+               ),
+               gateway_session_id: "gw_capture",
+               test_pid: self()
+             )
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        DynamicSupervisor.terminate_child(Prehen.Gateway.SessionWorkerSupervisor, pid)
+      end
+    end)
+
+    assert_receive {:captured_open_session, attrs}, 1_000
+    assert attrs.gateway_session_id == "gw_capture"
+    assert attrs.profile_name == "coder"
+    assert attrs.agent == "coder"
+    assert is_binary(attrs.mcp_token) and attrs.mcp_token != ""
+    assert is_binary(attrs.mcp_url) and String.ends_with?(attrs.mcp_url, "/mcp")
+  end
+
   defp session_config(workspace, overrides \\ []) do
     base = %SessionConfig{
       profile_name: "coder",
@@ -216,7 +332,8 @@ defmodule Prehen.Gateway.SessionWorkerTest do
       prompt_profile: "coder_default",
       workspace_policy: %{mode: "scoped"},
       implementation: implementation(),
-      workspace: workspace
+      workspace: workspace,
+      system_prompt: "PREHEN GLOBAL\n\nSOUL\n\nAGENTS"
     }
 
     struct!(base, Enum.into(overrides, %{}))

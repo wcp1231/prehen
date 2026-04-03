@@ -30,16 +30,45 @@ def turn_text():
             skip_next = False
             continue
 
-        if arg in {"--mode", "--provider", "--model"}:
+        if arg in {
+            "--mode",
+            "--provider",
+            "--model",
+            "--append-system-prompt",
+            "--mcp-url",
+            "--mcp-bearer-token",
+        }:
             skip_next = True
             continue
 
-        if arg.startswith("--mode=") or arg.startswith("--provider=") or arg.startswith("--model="):
+        if (
+            arg.startswith("--mode=")
+            or arg.startswith("--provider=")
+            or arg.startswith("--model=")
+            or arg.startswith("--append-system-prompt=")
+            or arg.startswith("--mcp-url=")
+            or arg.startswith("--mcp-bearer-token=")
+        ):
             continue
 
         filtered.append(arg)
 
     return " ".join(filtered) or os.environ.get("FAKE_PI_TURN_TEXT", "")
+
+
+def option_value(name):
+    args = sys.argv[1:]
+
+    for index, arg in enumerate(args):
+        if arg == name and index + 1 < len(args):
+            return args[index + 1]
+
+        prefix = f"{name}="
+
+        if arg.startswith(prefix):
+            return arg[len(prefix) :]
+
+    return None
 
 
 def write_exit_marker():
@@ -58,11 +87,57 @@ def write_launch_marker():
             handle.write("launched\n")
 
 
+def write_launch_capture():
+    capture_path = os.environ.get("FAKE_PI_CAPTURE_PATH")
+
+    if not capture_path:
+        return
+
+    payload = {
+        "cwd": os.getcwd(),
+        "argv": sys.argv[1:],
+        "system_prompt": option_value("--append-system-prompt"),
+        "mcp_url_arg": option_value("--mcp-url"),
+        "mcp_token_arg": option_value("--mcp-bearer-token"),
+        "mcp_url_env": os.environ.get("PREHEN_MCP_URL"),
+        "mcp_token_env": os.environ.get("PREHEN_MCP_TOKEN"),
+    }
+
+    with open(capture_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle)
+
+
+def emit_help_contract():
+    contract = os.environ.get("FAKE_PI_HELP_CONTRACT", "none")
+
+    if contract == "http_flags":
+        sys.stdout.write("--mcp-url <url>\n--mcp-bearer-token <token>\n")
+        sys.stdout.flush()
+        return True
+
+    if contract == "http_env":
+        sys.stdout.write("PREHEN_MCP_URL\nPREHEN_MCP_TOKEN\n")
+        sys.stdout.flush()
+        return True
+
+    if contract == "none":
+        sys.stdout.write("--provider <provider>\n--model <model>\n")
+        sys.stdout.flush()
+        return True
+
+    return False
+
+
 def main():
     mode = os.environ.get("FAKE_PI_MODE", "happy")
     assistant_text = f"echo:{turn_text()}"
 
+    if "--help" in sys.argv[1:]:
+        emit_help_contract()
+        return
+
     write_launch_marker()
+    write_launch_capture()
 
     if mode == "wait_for_eof_before_header":
         sys.stdin.read()

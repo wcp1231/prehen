@@ -1,34 +1,22 @@
-# Prehen Current Architecture (As-Is)
+# Prehen Current Architecture
 
-_Last updated: 2026-04-02_
+_Last updated: 2026-04-03_
 
-This document describes the current single-node gateway architecture as implemented today.
+This document describes the current single-node Prehen gateway as implemented today.
 
-Prehen is now a local-first Agent Gateway and control plane:
+Prehen is now a profile-based local gateway:
 
-- external local agent processes own session truth and execution semantics
-- one gateway session maps to one wrapper-owned agent session
-- users select supported agent profiles, not raw executable implementations
-- HTTP and Phoenix Channels are the primary client surface
-- `/inbox` is the operator-facing browser entrypoint on the local node
-- the active coding-agent path is `PiCodingAgent` launching `pi --mode json`
-- retained inbox rows and history are in-memory only on the current node
+- user-facing selection is a profile
+- profile config comes from `~/.prehen/config.yaml`
+- each profile has a fixed home under `~/.prehen/profiles/<profile_id>`
+- that profile directory is the runtime workspace
+- prompt construction is file-based and deterministic
+- higher-level platform capabilities are exposed through local HTTP MCP
+- the active runtime implementation is `PiCodingAgent` launching `pi --mode json`
 
-## 1. Layer Overview
+## 1. Hot Path
 
-The current hot path is:
-
-1. `Prehen` public API
-2. `Prehen.Client.Surface`
-3. `Prehen.Gateway.Router`
-4. `Prehen.Gateway.SessionWorker`
-5. `Prehen.Agents.Wrapper` behaviour boundary
-6. `Prehen.Agents.Wrappers.PiCodingAgent`
-7. `Prehen.Agents.Wrappers.ExecutableHost`
-8. local `pi --mode json`
-9. `PrehenWeb` HTTP controllers and `PrehenWeb.SessionChannel`
-
-The gateway also keeps a small in-memory trace collector for gateway events only.
+The current session path is:
 
 ```text
 CLI / HTTP / Channel clients
@@ -39,163 +27,167 @@ Prehen
     v
 Prehen.Client.Surface
     |
-    v
-Prehen.Gateway.Router
-    |
-    +--> Prehen.Agents.Registry (supported profiles + internal implementation mapping)
+    +--> Prehen.Gateway.Router
+    +--> Prehen.ProfileEnvironment
+    +--> Prehen.PromptBuilder
     |
     v
 Prehen.Gateway.SessionWorker
     |
     +--> Prehen.Gateway.SessionRegistry
+    +--> Prehen.Gateway.InboxProjection
     +--> Prehen.Observability.TraceCollector
-    +--> Prehen.Agents.Wrappers.PiCodingAgent
+    +--> Prehen.MCP.SessionAuth
+    |
+    v
+Prehen.Agents.Wrappers.PiCodingAgent
+    |
+    +--> Prehen.Agents.Wrappers.PiLaunchContract
+    +--> Prehen.Agents.Wrappers.ExecutableHost
+    |
+    +--> local `pi --mode json` process
+    |
+    +--> local HTTP MCP (`/mcp`)
              |
-             +--> Prehen.Agents.Wrappers.ExecutableHost
-                      |
-                      +--> local `pi --mode json` process
+             +--> Prehen.MCP.ToolDispatch
+             +--> Prehen.MCP.Tools.Skills
 ```
 
-The inbox UI, inbox JSON endpoints, session registry, and retained history all operate against node-local in-memory state. There is no durable recovery or cross-node visibility.
+The system remains single-node and in-memory. There is no durable recovery layer yet.
 
-## 2. Component Responsibilities
+## 2. Responsibilities
 
-### 2.1 `Prehen`
+### 2.1 `Prehen.Client.Surface`
 
-- public API facade
-- forwards to the gateway-backed client surface
-- exposes the current gateway session helpers only
+- resolves the selected profile through the gateway router
+- rejects ad hoc workspace overrides
+- loads the fixed profile environment
+- builds the resolved `SessionConfig`
+- starts, stops, and submits to gateway sessions
 
-### 2.2 `Prehen.Client.Surface`
+### 2.2 `Prehen.Gateway.Router`
 
-- creates gateway sessions
-- submits messages to the active session worker
-- reads gateway session status
-- stops gateway sessions
-- exposes `run/2` as a gateway-backed CLI compatibility path
+- selects the requested supported profile
+- falls back to the default supported profile when the request omits `agent`
+- keeps profile selection separate from implementation selection
 
-### 2.3 `Prehen.Gateway.Router`
+### 2.3 `Prehen.ProfileEnvironment`
 
-- selects a supported agent profile by name
-- treats the phase-1 `agent` wire value as a profile identifier
-- honors explicit profile selection when provided
-- otherwise picks the default supported profile from the registry
-- binds the selected profile to its internal implementation before worker startup
+- resolves `~/.prehen` and `~/.prehen/profiles/<profile_id>`
+- ensures the fixed profile workspace exists
+- resolves `SOUL.md`, `AGENTS.md`, `skills/`, and `memory/`
+- defines the stable profile runtime boundary
 
-### 2.4 `Prehen.Agents.Registry`
+### 2.4 `Prehen.PromptBuilder`
 
-- stores configured profiles and implementations
-- runs wrapper support validation at startup so only supported profiles remain user-visible
-- returns supported profiles for `/agents` and default selection
-- keeps implementation lookup internal to router and worker startup
+- builds the runtime system prompt in fixed order
+- keeps prompt construction deterministic
+- mentions MCP-based skill usage instead of embedding skill bodies wholesale
 
-### 2.5 `Prehen.Gateway.SessionWorker`
+### 2.5 `Prehen.Agents.Registry`
 
-- one worker per gateway session
-- starts the configured wrapper
-- passes provider, model, workspace, and prompt context into wrapper startup
-- attaches the gateway session to the wrapper-owned agent session
+- stores configured profiles and runtime implementations
+- runs wrapper `support_check/1` at startup
+- exposes only supported profiles to `/agents`
+
+### 2.6 `Prehen.Gateway.SessionWorker`
+
+- owns one gateway session
+- starts the selected wrapper
+- binds `gateway_session_id` to the wrapper session
+- creates session-scoped MCP auth metadata
+- passes session-scoped MCP URL/token into wrapper startup
 - records and broadcasts normalized gateway events
-- owns the attachment between `gateway_session_id` and `agent_session_id`
 
-### 2.6 `Prehen.Gateway.SessionRegistry`
+### 2.7 `Prehen.MCP.SessionAuth`
 
-- stores route state only
-- tracks `gateway_session_id`, worker pid, agent name, agent session id, and attach status
-- does not own canonical session truth
-- keeps terminal route metadata available for status and idempotent stop handling
-- stops exposing a live worker route once the session reaches `:stopped` or `:crashed`
+- issues bearer tokens bound to one gateway session and profile
+- carries the current session capability set
+- invalidates tokens on session stop
+- can recover auth context from live session workers after an auth-server restart
 
-### 2.7 `Prehen.Observability.TraceCollector`
+### 2.8 `Prehen.MCP.ToolDispatch`
 
-- holds a small in-memory trace for gateway events
-- is used for immediate trace reads in `run/2` and related flows
-- does not persist session history
+- serves the current MCP JSON-RPC surface
+- currently supports `tools/list` and `tools/call`
+- filters visible tools by the session capability set
 
-### 2.8 `Prehen.Gateway.InboxProjection`
+### 2.9 `Prehen.MCP.Tools.Skills`
 
-- keeps inbox session summaries and message history for the browser surface
-- is rebuilt from live events only during the current node lifetime
-- keeps stopped sessions readable after stop, but only until restart
+- indexes global skills from `~/.prehen/skills/`
+- indexes private skills from `~/.prehen/profiles/<profile_id>/skills/`
+- exposes `skills.search`
+- exposes `skills.load`
+- keeps skill visibility scoped to the selected profile
 
-### 2.9 `Prehen.Agents.Wrappers.PiCodingAgent`
+### 2.10 `Prehen.Agents.Wrappers.PiCodingAgent`
 
-- active wrapper implementation for supported coding-agent profiles
-- owns session-local state, synthetic `agent_session_id`, and retained conversation context
-- validates workspace policy and launch requirements before a session is attached
-- launches one `pi` run per submitted turn and normalizes native JSON events into gateway frames
+- is the active runtime wrapper for coding profiles
+- keeps wrapper-local conversation state
+- uses the fixed profile workspace
+- appends the resolved system prompt on launch
+- probes `pi` for MCP ingestion contract support
+- launches one `pi` process per user turn
+- normalizes `pi` JSON events into gateway events
 
-### 2.10 `Prehen.Agents.Wrappers.ExecutableHost`
+### 2.11 `Prehen.Agents.Wrappers.PiLaunchContract`
 
-- generic child-process host used by the wrapper
-- resolves the executable path, launches the child process, and relays stdout, stderr, and exit status
-- keeps process hosting separate from wrapper state management
+- probes `pi --help`
+- classifies whether the installed runtime exposes a recognized MCP ingestion contract
+- currently recognizes HTTP flag and HTTP env styles
 
-### 2.11 `PrehenWeb`
+### 2.12 `PrehenWeb`
 
-- HTTP controllers expose supported profiles through `GET /agents`
-- session create surfaces continue to use the `agent` wire field, but its value is now a supported profile name
-- provider/model defaults come from the selected profile unless the request overrides them
-- `/inbox` serves the browser shell for operators
-- `PrehenWeb.SessionChannel` subscribes to `session:<gateway_session_id>` and forwards normalized envelopes
-- `PrehenWeb.EventSerializer` strips runtime-only fields and keeps the client payload JSON safe
+- serves `/sessions`, `/agents`, `/inbox`, and `/mcp`
+- keeps `/mcp` local-only
+- exposes SessionChannel streaming on `session:<gateway_session_id>`
 
 ## 3. Current Data Flow
 
 ### 3.1 Session Creation
 
 1. Client calls `POST /sessions`, `POST /inbox/sessions`, or `Prehen.create_session/1`.
-2. `Surface.create_session/1` asks the router for a supported profile.
-3. The router resolves that profile to its internal implementation.
-4. `SessionWorker` is started for that session.
-5. The worker builds prompt context and starts the configured wrapper.
-6. `PiCodingAgent` validates the session config and mints a synthetic `agent_session_id` without launching `pi` yet.
-7. `SessionRegistry` stores the route binding.
-8. `InboxProjection` records a node-local session row for `/inbox`.
+2. `Surface` resolves the supported profile through `Gateway.Router`.
+3. `ProfileEnvironment` resolves the fixed profile directory.
+4. `PromptBuilder` builds the resolved system prompt from global instructions, `SOUL.md`, `AGENTS.md`, and runtime context.
+5. `SessionWorker` starts and issues session-scoped MCP auth.
+6. `PiCodingAgent.open_session/2` stores session defaults and returns a synthetic `agent_session_id`.
+7. `SessionRegistry` stores route metadata.
+8. `InboxProjection` records the session row for `/inbox`.
 
 ### 3.2 Message Submission
 
-1. Client submits a message through HTTP `POST /sessions/:id/messages`, SessionChannel, or `Prehen.submit_message/3`.
-2. `Surface.submit_message/3` looks up the worker by `gateway_session_id`.
-3. The worker forwards the submit payload to `PiCodingAgent`.
-4. `PiCodingAgent` launches a per-turn `pi --mode json` child process through `ExecutableHost`.
-5. Native `pi` JSON lines are parsed and normalized into `session.output.delta`, `session.output.completed`, or `session.error`.
-6. The worker records the normalized event and broadcasts it on PubSub.
-7. `InboxProjection` appends retained history for the current node lifetime.
+1. Client submits a turn over HTTP, SessionChannel, or `Prehen.submit_message/3`.
+2. `Surface` finds the live worker by `gateway_session_id`.
+3. `SessionWorker` forwards the turn to `PiCodingAgent`.
+4. `PiCodingAgent` builds the launch spec from fixed workspace, provider, model, system prompt, and any recognized MCP contract metadata.
+5. `ExecutableHost` launches one local `pi --mode json` process for that turn.
+6. `PiCodingAgent` parses native `pi` JSON events and emits normalized gateway events.
+7. `SessionWorker` broadcasts them and updates inbox projection state.
 
-### 3.3 Channel Streaming
+### 3.3 MCP Calls
 
-1. Client joins `session:<gateway_session_id>`.
-2. `SessionChannel` checks that the session is attached to a live worker.
-3. The channel subscribes to the gateway PubSub topic.
-4. Incoming gateway events are serialized and pushed as `event`.
-5. Retained stopped sessions are read-only and reject new `submit` events.
+1. A running `pi` process receives MCP connection metadata when a recognized contract is available.
+2. `pi` calls local `POST /mcp` with the session bearer token.
+3. `MCPController` enforces local-only access and token auth.
+4. `ToolDispatch` resolves the tool call within the session capability set.
+5. `Skills` returns only global skills and the selected profile's private skills.
 
-### 3.4 Trace Reads
+### 3.4 Stop And Retention
 
-1. `Prehen.run/2` or trace-oriented callers read from `Prehen.Trace.for_session/1`.
-2. The collector returns the in-memory gateway event list for that session.
-3. Trace data is best-effort gateway observability, not durable recovery state.
-
-### 3.5 Stop and Retention
-
-1. Client stops a session through HTTP, `/inbox/sessions/:id`, or `Prehen.stop_session/1`.
-2. The gateway stops the attached worker or treats an already-terminal route as an idempotent stop.
-3. `SessionRegistry` retains terminal route metadata, and `InboxProjection` retains the inbox row and history for the rest of the node lifetime.
-4. `/inbox` can still render session detail and retained history after stop.
-5. A node restart clears those retained rows and history.
+1. Client stops the session through HTTP or `Prehen.stop_session/1`.
+2. The worker terminates the active wrapper and invalidates the MCP token.
+3. `SessionRegistry` retains terminal route metadata for status reads.
+4. `InboxProjection` retains session detail and history until node restart.
 
 ## 4. Current Constraints
 
 - single node only
-- one session maps to one wrapper-owned agent session
 - one in-flight turn per session
-- only profiles that pass wrapper support validation are exposed to users
-- unsupported or misconfigured implementations are rejected with classified wrapper or routing errors
-- no persistent session recovery
-- inbox session lists and history are node-local in-memory state
-- stopped sessions stay visible only until restart
-- no multi-node routing
-- no tool mediation through Prehen
-
-The old runtime-era modules, structured config loader, workspace layout manager, and OpenSpec assets have been removed from the repo. New work should extend the gateway path above rather than reintroducing those layers.
+- profile workspace is fixed; no ad hoc workspace path per session
+- profile registration comes from `~/.prehen/config.yaml`, not directory scanning
+- only `skills.search` and `skills.load` are implemented today
+- MCP transport is local HTTP only
+- real `pi` MCP contract smoke is opt-in
+- inbox rows and retained history are node-local in-memory state
+- no durable recovery or multi-node routing yet

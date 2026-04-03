@@ -3,7 +3,7 @@ defmodule Prehen.CLI do
 
   @usage """
   Usage:
-    prehen run --agent NAME "<task>" [--workspace PATH] [--session-id ID] [--timeout-ms N] [--trace-json]
+    prehen run --agent NAME "<task>" [--session-id ID] [--timeout-ms N] [--trace-json]
   """
 
   @spec main([String.t()]) :: {:ok, map()} | {:error, term()}
@@ -11,7 +11,6 @@ defmodule Prehen.CLI do
     {opts, args, invalid} =
       OptionParser.parse(argv,
         strict: [
-          workspace: :string,
           session_id: :string,
           agent: :string,
           timeout_ms: :integer,
@@ -50,7 +49,13 @@ defmodule Prehen.CLI do
           normalized == "root-dir" ->
             IO.puts(
               :stderr,
-              "Invalid option: --root-dir (removed). Use --workspace PATH instead."
+              "Invalid option: --root-dir (removed). Workspace is fixed by the selected profile."
+            )
+
+          normalized == "workspace" ->
+            IO.puts(
+              :stderr,
+              "Invalid option: --workspace (removed). Workspace is fixed by the selected profile."
             )
 
           normalized == "model" ->

@@ -20,6 +20,7 @@ defmodule PrehenWeb.Router do
   scope "/", PrehenWeb do
     pipe_through(:api)
 
+    post("/mcp", MCPController, :handle)
     get("/inbox/sessions", InboxController, :index)
     post("/inbox/sessions", InboxController, :create)
     get("/inbox/sessions/:id", InboxController, :show)

@@ -17,23 +17,27 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
         PiAgentFixture.registry_state([coder_profile()], [coder_implementation()])
       )
 
-    workspace = PiAgentFixture.workspace!("platform_runtime")
+    prehen_home = tmp_prehen_home("platform_runtime")
+    previous_prehen_home = System.get_env("PREHEN_HOME")
+
+    System.put_env("PREHEN_HOME", prehen_home)
+    write_profile_home!(prehen_home, "coder")
 
     on_exit(fn ->
       PiAgentFixture.restore_registry!(original)
-      File.rm_rf(workspace)
+      restore_prehen_home(previous_prehen_home)
+      File.rm_rf(prehen_home)
     end)
 
-    {:ok, workspace: workspace}
+    {:ok, prehen_home: prehen_home}
   end
 
-  test "control plane HTTP endpoints route through gateway sessions", %{workspace: workspace} do
+  test "control plane HTTP endpoints route through gateway sessions", %{prehen_home: prehen_home} do
     conn =
       post(build_conn(), "/sessions", %{
         "agent" => "coder",
         "provider" => "anthropic",
-        "model" => "claude-sonnet",
-        "workspace" => workspace
+        "model" => "claude-sonnet"
       })
 
     assert created = json_response(conn, 201)
@@ -46,6 +50,7 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
     assert session["agent_name"] == "coder"
     assert session["provider"] == "anthropic"
     assert session["model"] == "claude-sonnet"
+    assert session["workspace"] == profile_workspace(prehen_home, "coder")
 
     conn = post(build_conn(), "/sessions/#{session_id}/messages", %{"text" => "hello from http"})
     assert submitted = json_response(conn, 202)
@@ -77,6 +82,15 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
     assert message =~ "missing_profile"
   end
 
+  test "POST /sessions rejects workspace overrides once profile workspaces are fixed" do
+    conn = post(build_conn(), "/sessions", %{"agent" => "coder", "workspace" => "/tmp/other"})
+
+    assert %{"error" => %{"type" => "unprocessable_entity", "message" => message}} =
+             json_response(conn, 422)
+
+    assert message =~ ":workspace_override_not_supported"
+  end
+
   test "POST /sessions returns a classified error for a misconfigured implementation" do
     set_registry([coder_profile()], [])
 
@@ -90,9 +104,9 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
   end
 
   test "GET /sessions/:id returns JSON-safe gateway status without worker pid", %{
-    workspace: workspace
+    prehen_home: prehen_home
   } do
-    conn = post(build_conn(), "/sessions", %{"agent" => "coder", "workspace" => workspace})
+    conn = post(build_conn(), "/sessions", %{"agent" => "coder"})
     assert %{"session_id" => session_id} = json_response(conn, 201)
 
     on_exit(fn -> Surface.stop_session(session_id) end)
@@ -102,11 +116,12 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
 
     assert session["session_id"] == session_id
     assert session["status"] == "attached"
+    assert session["workspace"] == profile_workspace(prehen_home, "coder")
     refute Map.has_key?(session, "worker_pid")
   end
 
-  test "GET /sessions/:id omits worker_pid after retained terminal stop", %{workspace: workspace} do
-    conn = post(build_conn(), "/sessions", %{"agent" => "coder", "workspace" => workspace})
+  test "GET /sessions/:id omits worker_pid after retained terminal stop" do
+    conn = post(build_conn(), "/sessions", %{"agent" => "coder"})
     assert %{"session_id" => session_id} = json_response(conn, 201)
 
     assert :ok = Surface.stop_session(session_id)
@@ -120,10 +135,8 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
     assert {:error, :not_found} = Prehen.Gateway.SessionRegistry.fetch_worker(session_id)
   end
 
-  test "POST /sessions/:id/messages returns 400 when message text is missing", %{
-    workspace: workspace
-  } do
-    conn = post(build_conn(), "/sessions", %{"agent" => "coder", "workspace" => workspace})
+  test "POST /sessions/:id/messages returns 400 when message text is missing" do
+    conn = post(build_conn(), "/sessions", %{"agent" => "coder"})
     assert %{"session_id" => session_id} = json_response(conn, 201)
 
     on_exit(fn -> Surface.stop_session(session_id) end)
@@ -137,9 +150,9 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
     assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
   end
 
-  test "records gateway lifecycle events for a session run", %{workspace: workspace} do
+  test "records gateway lifecycle events for a session run" do
     assert {:ok, %{session_id: gateway_session_id}} =
-             Surface.create_session(agent: "coder", workspace: workspace)
+             Surface.create_session(agent: "coder")
 
     on_exit(fn -> Surface.stop_session(gateway_session_id) end)
 
@@ -151,9 +164,9 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
     assert Enum.any?(events, &(&1.type == "agent.started"))
   end
 
-  test "projects live status transitions and retains history after stop", %{workspace: workspace} do
+  test "projects live status transitions and retains history after stop" do
     assert {:ok, %{session_id: session_id}} =
-             Surface.create_session(agent: "coder", workspace: workspace)
+             Surface.create_session(agent: "coder")
 
     assert {:ok, row} = InboxProjection.fetch_session(session_id)
     assert row.status == :attached
@@ -211,4 +224,25 @@ defmodule Prehen.Integration.PlatformRuntimeTest do
   defp set_registry(profiles, implementations) do
     PiAgentFixture.replace_registry!(PiAgentFixture.registry_state(profiles, implementations))
   end
+
+  defp write_profile_home!(prehen_home, profile_name) do
+    profile_dir = profile_workspace(prehen_home, profile_name)
+    File.mkdir_p!(profile_dir)
+    File.write!(Path.join(profile_dir, "SOUL.md"), "SOUL for #{profile_name}.\n")
+    File.write!(Path.join(profile_dir, "AGENTS.md"), "AGENTS for #{profile_name}.\n")
+  end
+
+  defp profile_workspace(prehen_home, profile_name) do
+    Path.join([prehen_home, "profiles", profile_name])
+  end
+
+  defp tmp_prehen_home(label) do
+    Path.join(
+      System.tmp_dir!(),
+      "prehen_platform_#{label}_#{System.unique_integer([:positive])}"
+    )
+  end
+
+  defp restore_prehen_home(nil), do: System.delete_env("PREHEN_HOME")
+  defp restore_prehen_home(value), do: System.put_env("PREHEN_HOME", value)
 end

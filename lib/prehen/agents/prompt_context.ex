@@ -21,12 +21,15 @@ defmodule Prehen.Agents.PromptContext do
       workspace: workspace
     }
 
-    case Keyword.get(opts, :capabilities) do
-      capabilities when is_map(capabilities) and map_size(capabilities) > 0 ->
+    case normalize_capabilities(Keyword.get(opts, :capabilities)) do
+      capabilities when map_size(capabilities) > 0 ->
         Map.put(context, :capabilities, capabilities)
 
       _ ->
         context
     end
   end
+
+  defp normalize_capabilities(capabilities) when is_map(capabilities), do: capabilities
+  defp normalize_capabilities(_capabilities), do: %{}
 end

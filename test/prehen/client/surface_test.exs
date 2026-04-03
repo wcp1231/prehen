@@ -78,6 +78,8 @@ defmodule Prehen.Client.SurfaceTest do
         workspace:
           Map.get(attrs, :workspace) || Map.get(attrs, "workspace") || session_config.workspace,
         prompt_profile: session_config.prompt_profile,
+        profile_dir: Map.get(session_config, :profile_dir),
+        system_prompt: Map.get(session_config, :system_prompt),
         prompt: Map.get(attrs, :prompt) || Map.get(attrs, "prompt")
       }
     end
@@ -237,16 +239,29 @@ defmodule Prehen.Client.SurfaceTest do
   alias Prehen.Gateway.SessionRegistry
   alias Prehen.TestSupport.PiAgentFixture
 
+  setup_all do
+    Application.ensure_all_started(:prehen)
+    :ok
+  end
+
   setup do
     original = PiAgentFixture.replace_registry!(registry_state())
-    workspace = PiAgentFixture.workspace!("surface")
+    prehen_home = tmp_prehen_home("surface")
+    previous_prehen_home = System.get_env("PREHEN_HOME")
+
+    System.put_env("PREHEN_HOME", prehen_home)
+    write_profile_home!(prehen_home, "coder")
+    write_profile_home!(prehen_home, "inspecting")
+    write_profile_home!(prehen_home, "correlated_agent")
+    write_profile_home!(prehen_home, "slow_open")
 
     on_exit(fn ->
       PiAgentFixture.restore_registry!(original)
-      File.rm_rf(workspace)
+      restore_prehen_home(previous_prehen_home)
+      File.rm_rf(prehen_home)
     end)
 
-    {:ok, workspace: workspace}
+    {:ok, prehen_home: prehen_home}
   end
 
   test "application boots gateway registry runtime children" do
@@ -256,26 +271,32 @@ defmodule Prehen.Client.SurfaceTest do
   end
 
   test "create_session starts a gateway session and returns gateway metadata", %{
-    workspace: workspace
+    prehen_home: prehen_home
   } do
     assert {:ok, %{session_id: gateway_session_id, agent: "coder"}} =
-             Surface.create_session(agent: "coder", workspace: workspace)
+             Surface.create_session(agent: "coder", prehen_home: prehen_home)
 
     assert is_binary(gateway_session_id)
-    assert {:ok, %{status: :attached}} = SessionRegistry.fetch(gateway_session_id)
+
+    assert {:ok, %{status: :attached, workspace: workspace}} =
+             SessionRegistry.fetch(gateway_session_id)
+
+    assert workspace == profile_workspace(prehen_home, "coder")
 
     assert :ok = Surface.stop_session(gateway_session_id)
   end
 
   test "create_session resolves provider model prompt and workspace before wrapper startup", %{
-    workspace: workspace
+    prehen_home: prehen_home
   } do
+    expected_workspace = profile_workspace(prehen_home, "inspecting")
+
     assert {:ok, %{session_id: session_id, agent: "inspecting"}} =
              Surface.create_session(
                agent: "inspecting",
                provider: "anthropic",
                model: "claude-sonnet",
-               workspace: workspace,
+               prehen_home: prehen_home,
                test_pid: self()
              )
 
@@ -284,8 +305,10 @@ defmodule Prehen.Client.SurfaceTest do
                       profile_name: "inspecting",
                       provider: "anthropic",
                       model: "claude-sonnet",
-                      workspace: ^workspace,
+                      workspace: ^expected_workspace,
                       prompt_profile: "coder_default",
+                      profile_dir: ^expected_workspace,
+                      system_prompt: system_prompt,
                       prompt: %{
                         prompt_profile: "coder_default",
                         session: %{
@@ -294,61 +317,83 @@ defmodule Prehen.Client.SurfaceTest do
                           model: "claude-sonnet"
                         },
                         workspace: %{
-                          root_dir: ^workspace,
+                          root_dir: ^expected_workspace,
                           policy: %{mode: "scoped"}
+                        },
+                        capabilities: %{
+                          skills: skills
                         }
                       }
                     }}
+
+    assert Enum.sort(skills) == ["skills.load", "skills.search"]
+
+    assert system_prompt =~ "SOUL for inspecting."
+    assert system_prompt =~ "AGENTS for inspecting."
+    assert system_prompt =~ "workspace: #{expected_workspace}"
+    assert system_prompt =~ "skills.search"
+    assert system_prompt =~ "skills.load"
 
     assert is_binary(session_id)
     assert :ok = Surface.stop_session(session_id)
   end
 
-  test "create_session allocates a workspace when omitted", %{workspace: setup_workspace} do
+  test "create_session resolves the fixed profile workspace when workspace is omitted", %{
+    prehen_home: prehen_home
+  } do
+    expected_workspace = profile_workspace(prehen_home, "inspecting")
+
     assert {:ok, %{session_id: session_id, agent: "inspecting"}} =
-             Surface.create_session(agent: "inspecting", test_pid: self())
+             Surface.create_session(agent: "inspecting", prehen_home: prehen_home, test_pid: self())
 
     assert_receive {:wrapper_opened,
                     %{
                       profile_name: "inspecting",
-                      workspace: workspace,
+                      workspace: ^expected_workspace,
                       prompt: %{
                         workspace: %{
-                          root_dir: workspace,
+                          root_dir: ^expected_workspace,
                           policy: %{mode: "scoped"}
                         }
                       }
                     }}
 
-    assert is_binary(workspace)
-    assert Path.type(workspace) == :absolute
-    assert workspace != setup_workspace
-    assert File.dir?(workspace)
+    assert File.dir?(expected_workspace)
+    assert Path.type(expected_workspace) == :absolute
 
-    assert {:ok, %{workspace: ^workspace, status: :attached}} = Surface.session_status(session_id)
+    assert {:ok, %{workspace: ^expected_workspace, status: :attached}} =
+             Surface.session_status(session_id)
 
-    on_exit(fn ->
-      :ok = Surface.stop_session(session_id)
-      File.rm_rf(workspace)
-    end)
+    on_exit(fn -> :ok = Surface.stop_session(session_id) end)
+  end
+
+  test "create_session rejects ad hoc workspace overrides once profile workspaces are fixed", %{
+    prehen_home: prehen_home
+  } do
+    assert {:error, %{reason: :workspace_override_not_supported}} =
+             Surface.create_session(
+               agent: "coder",
+               prehen_home: prehen_home,
+               workspace: "/tmp/other"
+             )
   end
 
   test "create_session allows slow wrapper startup through the real session worker path", %{
-    workspace: workspace
+    prehen_home: prehen_home
   } do
     started_at = System.monotonic_time(:millisecond)
 
     assert {:ok, %{session_id: session_id, agent: "slow_open"}} =
-             Surface.create_session(agent: "slow_open", workspace: workspace)
+             Surface.create_session(agent: "slow_open", prehen_home: prehen_home)
 
     assert System.monotonic_time(:millisecond) - started_at >= 5_000
     assert is_binary(session_id)
     assert :ok = Surface.stop_session(session_id)
   end
 
-  test "submit_message and session_status use gateway session ids", %{workspace: workspace} do
+  test "submit_message and session_status use gateway session ids", %{prehen_home: prehen_home} do
     assert {:ok, %{session_id: session_id}} =
-             Surface.create_session(agent: "coder", workspace: workspace)
+             Surface.create_session(agent: "coder", prehen_home: prehen_home)
 
     on_exit(fn -> Surface.stop_session(session_id) end)
 
@@ -365,9 +410,9 @@ defmodule Prehen.Client.SurfaceTest do
     refute Map.has_key?(status, :worker_pid)
   end
 
-  test "session_status retains stopped and crashed terminal sessions", %{workspace: workspace} do
+  test "session_status retains stopped and crashed terminal sessions", %{prehen_home: prehen_home} do
     assert {:ok, %{session_id: stopped_session_id}} =
-             Surface.create_session(agent: "coder", workspace: workspace)
+             Surface.create_session(agent: "coder", prehen_home: prehen_home)
 
     assert :ok = Surface.stop_session(stopped_session_id)
 
@@ -379,7 +424,7 @@ defmodule Prehen.Client.SurfaceTest do
     refute Map.has_key?(stopped_status, :worker_pid)
 
     assert {:ok, %{session_id: crashed_session_id}} =
-             Surface.create_session(agent: "coder", workspace: workspace)
+             Surface.create_session(agent: "coder", prehen_home: prehen_home)
 
     assert {:ok, worker_pid} = SessionRegistry.fetch_worker(crashed_session_id)
     wrapper_pid = :sys.get_state(worker_pid).wrapper
@@ -397,10 +442,10 @@ defmodule Prehen.Client.SurfaceTest do
   end
 
   test "run/2 on reused session correlates to its own request_id and returns complete trace", %{
-    workspace: workspace
+    prehen_home: prehen_home
   } do
     assert {:ok, %{session_id: session_id}} =
-             Surface.create_session(agent: "correlated_agent", workspace: workspace)
+             Surface.create_session(agent: "correlated_agent", prehen_home: prehen_home)
 
     on_exit(fn -> Surface.stop_session(session_id) end)
 
@@ -470,4 +515,25 @@ defmodule Prehen.Client.SurfaceTest do
 
     PiAgentFixture.registry_state(profiles, implementations)
   end
+
+  defp write_profile_home!(prehen_home, profile_name) do
+    profile_dir = profile_workspace(prehen_home, profile_name)
+    File.mkdir_p!(profile_dir)
+    File.write!(Path.join(profile_dir, "SOUL.md"), "SOUL for #{profile_name}.\n")
+    File.write!(Path.join(profile_dir, "AGENTS.md"), "AGENTS for #{profile_name}.\n")
+  end
+
+  defp profile_workspace(prehen_home, profile_name) do
+    Path.join([prehen_home, "profiles", profile_name])
+  end
+
+  defp tmp_prehen_home(label) do
+    Path.join(
+      System.tmp_dir!(),
+      "prehen_surface_#{label}_#{System.unique_integer([:positive])}"
+    )
+  end
+
+  defp restore_prehen_home(nil), do: System.delete_env("PREHEN_HOME")
+  defp restore_prehen_home(value), do: System.put_env("PREHEN_HOME", value)
 end

@@ -23,6 +23,7 @@ defmodule Prehen.MixProject do
   defp deps do
     [
       {:jason, "~> 1.4"},
+      {:yaml_elixir, "~> 2.11"},
 
       # Phoenix
       {:phoenix, "~> 1.8"},
